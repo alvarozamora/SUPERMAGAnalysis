@@ -2,7 +2,17 @@
 name = "SUPERMAGAnalysis"
 version = "0.1.0"
 edition = "2021"
+description = "This analysis pipeline closely follows (Michael A. Fedderke, Peter W. Graham, Derek F. Jackson Kimball, and Saarik Kalia 2021). We refer to this work as 'the paper' throuhout the codebase."
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+csv = "1.1.6"
+serde = "1.0.137" 
+serde_derive = "1.0.137"
+ndarray = "0.15.4"
+ndarray-npy = "0.8.1"
+anyhow = "1.0.57"
+glob = "0.3.0"
+mpi = { version = "0.6.0", path = "../../rustMPItest/" }
+dashmap = "5.3.4"
