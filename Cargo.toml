@@ -1,5 +1,5 @@
 [package]
-name = "SUPERMAGAnalysis"
+name = "supermag_analysis"
 version = "0.1.0"
 edition = "2021"
 description = "This analysis pipeline closely follows (Michael A. Fedderke, Peter W. Graham, Derek F. Jackson Kimball, and Saarik Kalia 2021). We refer to this work as 'the paper' throuhout the codebase."
@@ -16,3 +16,5 @@ anyhow = "1.0.57"
 glob = "0.3.0"
 mpi = { version = "0.6.0", path = "../../rustMPItest/" }
 dashmap = "5.3.4"
+tokio = { version = "1.19.2", features = ["full"] }
+futures = "0.3.21"
