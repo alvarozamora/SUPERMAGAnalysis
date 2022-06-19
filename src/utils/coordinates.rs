@@ -13,8 +13,8 @@ pub struct StationCsvEntry {
 
 #[derive(Debug, Deserialize, PartialEq, Copy, Clone)]
 pub struct Coordinates {
-    longitude: f64,
-    latitude: f64,
+    pub longitude: f64,
+    pub latitude: f64,
 }
 
 
