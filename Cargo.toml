@@ -15,6 +15,12 @@ ndarray-npy = "0.8.1"
 anyhow = "1.0.57"
 glob = "0.3.0"
 mpi = { version = "0.6.0", path = "../../rustMPItest/" }
-dashmap = "5.3.4"
+dashmap = { version = "5.3.4", features = ["rayon"] }
 tokio = { version = "1.19.2", features = ["full"] }
 futures = "0.3.21"
+goertzel-filter = "0.2.0"
+rayon = "1.5.2"
+sphrs = "0.1.3"
+num-complex = "0.2.3"
+special = "0.8.1"
+lazy_static = "1.4.0"
