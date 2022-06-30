@@ -342,7 +342,8 @@ impl DatasetLoader {
                 let data: Vec<Dataset> = join_all(futs).await;
                 
                 for (chunk, data) in chunks.iter().zip(data) {
-                    assert!(result.insert(chunk.station.clone(), data).is_none());
+                    let cleaned_station_name: String = chunk.station.split("/").collect::<Vec<_>>().get(2).unwrap().to_string();
+                    assert!(result.insert(cleaned_station_name, data).is_none());
                 }
 
                 Ok(result)
@@ -374,7 +375,7 @@ async fn _load_chunk(index: Index, chunk: Chunk, coordinates: Coordinates) -> Da
         .fold(Dataset::default(), |mut acc, dataset| {
             acc.field_1.append(Axis(0), dataset[0].view()).unwrap();
             acc.field_2.append(Axis(0), dataset[1].view()).unwrap();
-            acc.field_3.append(Axis(0), dataset[3].view()).unwrap();
+            acc.field_3.append(Axis(0), dataset[2].view()).unwrap();
             acc
         });
         [combined_dataset.field_1, combined_dataset.field_2, combined_dataset.field_3]
@@ -424,34 +425,40 @@ fn retrieve_stations(year: usize) -> Vec<String> {
 fn retrieve_chunks(days: usize) -> Arc<DashMap<Index, Vec<Chunk>>> {
 
     // Gather paths to all stations
-    let stations = || { glob("../stations/*").unwrap() };
+    let stations: Vec<_> = glob("../stations/*").unwrap().map(|x| x.unwrap()).collect::<Vec<_>>();
+    let station_days: std::collections::HashSet<PathBuf> = glob("../stations/*/*").unwrap().map(|x| x.unwrap()).collect();
 
     // Initialize DashMap containing semivalid chunks
     let semivalid_chunks = Arc::new(DashMap::new());
 
 
     // Iterate through every chunk of days
-    // for (index, chunk) in DATA_DAYS.step_by(days).map(|x| (x..).take(days)).enumerate().into_par_iter() {
-    DATA_DAYS.step_by(days).map(|x| (x..).take(days)).collect::<Vec<_>>().into_par_iter().enumerate().for_each(|(index, chunk)| {
-
+    DATA_DAYS
+        .step_by(days)
+        .map(|x| (x..).take(days))
+        .collect::<Vec<_>>()
+        .into_par_iter()
+        .enumerate()
+        .for_each(|(index, chunk)| {
 
         // Initialize vector which holds which stations contain semi-valid data for this chunk
-        let chunks: Vec<Chunk> = stations()
+        let chunks: Vec<Chunk> = stations
+            .iter()
             .filter_map(|station| {
 
                 // Check if files exist for that (station, chunk)
                 // First, construct file paths.
                 let files: Vec<PathBuf> = chunk
                     .clone()
-                    .map(|day|  PathBuf::from(format!("{}/{day}", station.as_ref().unwrap().display())))
+                    .map(|day|  PathBuf::from(format!("{}/{day}", station.display())))
                     .collect();
 
                 // Then check if they all exist
-                if files.iter().all(|file| file.exists()) {
+                if files.iter().all(|file| station_days.contains(file)) {
                     
                     // If so, return `Chunk`
                     Some(Chunk {
-                        station: station.unwrap().display().to_string(),
+                        station: station.display().to_string(),
                         files,
                     })
                 } else {

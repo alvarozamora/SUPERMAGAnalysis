@@ -31,7 +31,7 @@ pub type StationName = String;
 pub type VecSphFn = Arc<dyn Fn(Theta, Phi) -> VecSph + 'static + Send + Sync>;
 pub type TimeSeries = Array1<f32>;
 pub type Series = Array1<f32>;
-pub type Signal = Array1<f32>;
+pub type ComplexSeries = Array1<ndrustfft::Complex<f32>>;
 pub type DataVector = DashMap<NonzeroElement, TimeSeries>;
 pub type Modes = Vec<Mode>;
 pub type NonzeroElements = Vec<NonzeroElement>;
@@ -58,13 +58,12 @@ pub trait Theory: Clone + Send {
 
     // /// This calculates the theoretical signal expected for the Earth's magnetic field
     // /// for a given set of coordinates.
-    // fn calculate_theoretical_signal(&self) -> Signal;
     fn calculate_data_vector(
         &self,
         projections: DashMap<NonzeroElement, TimeSeries>,
-        frequencies: &[Frequency],
-        total_time: f32,
-    ) -> DashMap<(FrequencyIndex, NonzeroElement), DFTValue>;
+        // frequencies: &[Frequency],
+        // total_time: f32,
+    ) -> DashMap<NonzeroElement, ComplexSeries>;
 }
 
 

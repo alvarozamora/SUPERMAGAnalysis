@@ -1,7 +1,8 @@
 use mpi::topology::{SystemCommunicator, Communicator};
 use mpi::traits::*;
 use std::thread::{JoinHandle, spawn};
-use std::ops::{Add, Sub, Div};
+use tokio::runtime::Runtime;
+use futures::prelude::*;
 
 type Handles<T> = Vec<JoinHandle<T>>;
 
@@ -11,7 +12,9 @@ pub struct Balancer<T> {
     pub workers: usize,
     pub rank: usize,
     pub size: usize,
+    pub runtime: Runtime,
     handles: Handles<T>,
+    tasks: Vec<Box<dyn Future<Output=T> + Unpin>>,
 }
 
 impl<T> Balancer<T> {
@@ -23,6 +26,12 @@ impl<T> Balancer<T> {
         let universe = mpi::initialize().unwrap();
         let world = universe.world();
 
+        // Initialize tokio runtime
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
         // This is the maximum number of `JoinHandle`s allowed.
         // Set equal to available_parallelism minus reduce (user input)
         let workers: usize = std::thread::available_parallelism().unwrap().get() - reduce;
@@ -42,7 +51,9 @@ impl<T> Balancer<T> {
             workers,
             rank,
             size,
+            runtime,
             handles: vec![],
+            tasks: vec![],
         }
     }
 
@@ -53,6 +64,12 @@ impl<T> Balancer<T> {
         // Set equal to available_parallelism minus reduce (user input)
         let workers: usize = std::thread::available_parallelism().unwrap().get() - reduce;
 
+        // Initialize tokio runtime
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
         // This is the node id and total number of nodes
         let rank: usize = world.rank() as usize;
         let size: usize = world.size() as usize;
@@ -68,7 +85,9 @@ impl<T> Balancer<T> {
             workers,
             rank,
             size,
+            runtime,
             handles: vec![],
+            tasks: vec![],
         }
     }
 
@@ -101,6 +120,14 @@ impl<T> Balancer<T> {
         self.handles.push(spawn(f));
     }
 
+    /// Adds a handle
+    pub fn task<F>(&mut self, fut: F)
+    where
+        F: Future<Output=T> + 'static + Unpin
+    {
+        self.tasks.push(Box::new(fut));
+    }
+
     /// Waits for all threads to finish (only on this rank! see `barrier` for blocking across all ranks).
     pub fn wait(&mut self) {
         while self.handles.len() > 0  {
@@ -108,6 +135,14 @@ impl<T> Balancer<T> {
             self.handles
                 .retain(|task| !task.is_finished());
         }
+    }
+
+    pub async fn async_wait(&mut self) -> Vec<T>
+    {
+        futures::stream::iter(self.tasks)
+            .buffered(self.size * 5)
+            .collect::<Vec<T>>()
+            .await
     }
 
     /// Waits for all threads to finish (across all ranks! see `barrier` for blocking on one rank).

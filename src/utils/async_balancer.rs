@@ -19,12 +19,13 @@ pub struct Manager<T> {
     pub size: usize,
     tasks: Vec<Box<dyn Future<Output=T>>>,
     done: bool,
+    buffer: usize,
 }
 
 impl<T> Balancer<T> {
 
     /// Constructs a new `Balancer` after initializing mpi
-    pub fn new(reduce: usize) -> Self {
+    pub fn new(async_tasks: usize, buffer: usize) -> Self {
 
         // Initialize mpi
         let universe = mpi::initialize().unwrap();
@@ -32,7 +33,17 @@ impl<T> Balancer<T> {
 
         // This is the maximum number of `JoinHandle`s allowed.
         // Set equal to available_parallelism minus reduce (user input)
-        let workers: usize = std::thread::available_parallelism().unwrap().get() - reduce;
+        let max_available_threads = std::thread::available_parallelism().unwrap().get();
+        let workers: usize = if async_tasks > max_available_threads {
+
+            println!("async_tasks provided ({async_tasks}) exceeds max_available_threads");
+            println!("defaulting to max_available_threads");
+
+            max_available_threads
+        } else {
+
+            async_tasks
+        };
 
         // Initialize tokio runtime
         let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -54,20 +65,19 @@ impl<T> Balancer<T> {
             println!("--------------------------------------");
         } 
 
-        (
-            Balancer {
-                manager: Manager {
-                    world,
-                    workers,
-                    rank,
-                    size,
-                    tasks: vec![],
-                    done: false,
-                },
-                runtime
-            }
-        )
-    }
+        Balancer {
+            manager: Manager {
+                world,
+                workers,
+                rank,
+                size,
+                tasks: vec![],
+                done: false,
+                buffer,
+            },
+            runtime
+        }
+}
 }
 
 impl<T> Manager<T> { 
@@ -102,7 +112,7 @@ impl<T> Manager<T> {
             .drain(..)
             .map(|fut| Pin::from(fut))
         )
-            .buffered(self.size * 5)
+            .buffered(self.size * self.buffer)
             .collect::<Vec<_>>()
             .await;
 

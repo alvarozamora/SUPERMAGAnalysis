@@ -4,20 +4,20 @@ use crate::{
     utils::async_balancer::*,
     theory::*,
 };
-use ndarray::{Array1, arr1, ScalarOperand};
+use ndarray::{Array1, arr1};
 use dashmap::DashMap;
 use std::sync::{Arc, RwLock};
 use std::ops::AddAssign;
 use dashmap::try_result::TryResult;
 use std::ops::Range;
-use std::fmt::Debug;
-use rayon::iter::ParallelIterator;
+// use rayon::iter::ParallelIterator;
 
 
 type Index = usize;
 type Weight = f32;
 type StationName = String;
 type TimeSeries = Array1<f32>;
+type ComplexSeries = Array1<ndrustfft::Complex<f32>>;
 
 /// This holds the weights (inverse white noise). These weights are a measurement 
 /// intrinsic to the dataset and do not depend on the theory.
@@ -33,7 +33,7 @@ pub struct Weights {
 pub struct Analysis<T: Theory + Send> {
     pub weights: Arc<Weights>,
     pub theory: T,
-    pub data_vector: DashMap<Index, DashMap<(FrequencyIndex, NonzeroElement), DFTValue>>,
+    pub data_vector: DashMap<Index, DashMap<NonzeroElement, ComplexSeries>>,
 }
 
 impl<T: Theory + Send + Sync + 'static> Analysis<T> {
@@ -132,10 +132,13 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
     //     weights
     // }
 
-    /// This calculates the inverse white noise (i.e. weights) on chunks of daily data,
-    /// similar to eq 13 and 14 in the paper. 
+    /// This runs an analysis for a given theory. It chunks the data into the specified intervals,
+    /// calculates the inverse white noise (i.e. weights) (similar to eq 13 and 14 in the paper)
+    ///  and calculates the data vector on said chunks of data.
     pub async fn new(mode: Coherence, theory: T, balancer: &mut Manager<()>) -> Arc<Self>
     {
+
+        println!("Running Analysis");
 
         // Number of days per chunk
         let days: usize = match mode {
@@ -184,6 +187,12 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     // Load datasets for this chunk
                     let datasets: DashMap<StationName, Dataset> = local_loader.load_chunk(index).await.unwrap();
 
+                    // e.g. on a year boundary where all stations change
+                    if datasets.len() == 0 {
+                        println!("Empty chunk. Proceeding to next chunk");
+                        return ()
+                    }
+
                     // Local hashmaps and time series
                     let local_hashmap_n: Arc<DashMap<StationName, Weight>> = Arc::new(DashMap::with_capacity(datasets.len()));
                     let local_hashmap_e: Arc<DashMap<StationName, Weight>> = Arc::new(DashMap::with_capacity(datasets.len()));
@@ -191,67 +200,80 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     let local_we: Arc<RwLock<TimeSeries>> = Arc::new(RwLock::new(arr1(&vec![0.0_f32; days * SECONDS_PER_DAY])));
                     
                     datasets
-                        .par_iter_mut()
+                        .iter()
                         .for_each(|dataset| {
                             // for mut dataset in datasets.iter_mut() {
                         
-                        // Unpack value from (key, value) pair from DashMap
-                        let dataset = dataset.value();
+                            // Unpack value from (key, value) pair from DashMap
+                            let dataset = dataset.value();
 
-                        // Valid samples
-                        let num_samples: usize = dataset.field_1.fold(0, |acc, &x| if x != SUPERMAG_NAN { acc + 1 } else { acc } );
-                        println!(
-                            "Station {} has {} null entries ({:.1}%) for chunk index {}",
-                            &dataset.station_name,
-                            dataset.field_1.len() - num_samples,
-                            (dataset.field_1.len() - num_samples) as f64 / dataset.field_1.len() as f64,
-                            index,
-                        );
-                        
-                        // If there are no valid entries, abort. Do not clean, and do not modify dashmap
-                        if num_samples == 0 {
-                            println!("Station {} index {} aborting", &dataset.station_name, index);
-                            return () 
-                        }
-                        // println!("Station {} index {} continuing", &dataset.station_name, index);
-    
+                            // Valid samples
+                            let num_samples: usize = dataset.field_1.fold(0, |acc, &x| if x != SUPERMAG_NAN { acc + 1 } else { acc } );
 
-                        // Clean the fields
-                        let clean_field_1 = dataset.field_1.map(|&x| if x != SUPERMAG_NAN { x } else { 0.0 });
-                        let clean_field_2 = dataset.field_2.map(|&x| if x != SUPERMAG_NAN { x } else { 0.0 });
+                            // If there are no valid entries, abort. Do not clean, and do not modify dashmap
+                            if num_samples == 0 {
+                                println!("Station {} index {} aborting", &dataset.station_name, index);
+                                return ()
+                            }
+        
 
-                        if cfg!(debug_assertions) {
-                            println!(
-                                "Station {} has {:?} min/max entries for chunk index {}",
-                                &dataset.station_name,
-                                clean_field_1.fold((0.0, 0.0), |mut acc, &x| {
-                                    if acc.0 > x {
-                                        acc.0 = x; 
-                                    }
-                                    if acc.1 < x {
-                                        acc.1 = x;
-                                    }
-                                    acc
-                                }),
-                                index,
-                            );
-                        }
+                            // Clean the fields
+                            let clean_field_1 = dataset.field_1.map(|&x| if x != SUPERMAG_NAN { x } else { 0.0 });
+                            let clean_field_2 = dataset.field_2.map(|&x| if x != SUPERMAG_NAN { x } else { 0.0 });
 
-                        // Calculate weights (NOTE: these were swapped at some point due to a typo idenitified in the paper)
-                        let n_weight: f32 = (clean_field_2.dot(&clean_field_1) / num_samples as f32).recip();
-                        let e_weight: f32 = (clean_field_1.dot(&clean_field_2) / num_samples as f32).recip();
-                        let wn_weight: TimeSeries = clean_field_2.map(|&x| if x != 0.0 { n_weight } else { 0.0 });
-                        let we_weight: TimeSeries = clean_field_1.map(|&x| if x != 0.0 { e_weight } else { 0.0 });
+                            if cfg!(debug_assertions) {
 
-                        // Add to local hashmaps and time series
-                        local_hashmap_n.insert(dataset.station_name.clone(), n_weight);
-                        local_hashmap_e.insert(dataset.station_name.clone(), e_weight);
-                        local_wn.write().unwrap().add_assign(&wn_weight);
-                        local_we.write().unwrap().add_assign(&we_weight);
-                    });
+                                println!(
+                                    "Station {} has {} null entries ({:.1}%) for chunk index {}",
+                                    &dataset.station_name,
+                                    dataset.field_1.len() - num_samples,
+                                    (dataset.field_1.len() - num_samples) as f64 / dataset.field_1.len() as f64,
+                                    index,
+                                );
+                                
+                                println!(
+                                    "Station {} has {:?} min/max entries for chunk index {}",
+                                    &dataset.station_name,
+                                    clean_field_1.fold((0.0, 0.0), |mut acc, &x| {
+                                        if acc.0 > x {
+                                            acc.0 = x; 
+                                        }
+                                        if acc.1 < x {
+                                            acc.1 = x;
+                                        }
+                                        acc
+                                    }),
+                                    index,
+                                );
+                            }
 
-                
+                            // Calculate weights (NOTE: these were swapped at some point due to a typo idenitified in the paper)
+                            let n_weight: f32 = (clean_field_2.dot(&clean_field_1) / num_samples as f32).recip();
+                            let e_weight: f32 = (clean_field_1.dot(&clean_field_2) / num_samples as f32).recip();
+                            // TODO: calculate indices of nans
+                            let wn_weight: TimeSeries = clean_field_2.map(|&x| if x != 0.0 { n_weight } else { 0.0 });
+                            let we_weight: TimeSeries = clean_field_1.map(|&x| if x != 0.0 { e_weight } else { 0.0 });
+
+                            // Add to local hashmaps and time series
+                            let clean_station_name: String = dataset.station_name.clone().split("/").collect::<Vec<_>>().get(2).unwrap().to_string();
+                            local_hashmap_n.insert(clean_station_name.clone(), n_weight);
+                            local_hashmap_e.insert(clean_station_name, e_weight);
+                            local_wn.write().unwrap().add_assign(&wn_weight);
+                            local_we.write().unwrap().add_assign(&we_weight);
+                        });
+
+                    println!("Finished weights");
+                    println!("local_hashmap_n has {} entries", local_hashmap_n.len());
+                    println!("local_hashmap_n has {} entries", local_hashmap_n.len());
+
+
+                    // e.g. all stations have nans for all values for this chunk
+                    if local_hashmap_n.len() == 0 {
+                        println!("Invalid chunk. Proceeding to next chunk");
+                        return ()
+                    }
                     // Calculate projections
+                    println!("calculating projections");
                     let projections = local_theory.calculate_projections(
                         Arc::clone(&local_hashmap_n),
                         Arc::clone(&local_hashmap_e),
@@ -279,12 +301,11 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     }
 
                     // Calculate data vector
-                    let total_time = SECONDS_PER_DAY as f32 * days as f32;
-                    let frequencies = &[300.0/total_time, 400.0/total_time, 500.0/total_time];
+                    println!("calculating data vector");
+                    // let total_time = SECONDS_PER_DAY as f32 * days as f32;
+                    // let frequencies = &[300.0/total_time, 400.0/total_time, 500.0/total_time];
                     let local_data_vector_value = local_theory.calculate_data_vector(
                         projections,
-                        frequencies,
-                        total_time,
                     );
 
                     // Insert data vector
@@ -296,6 +317,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         }
 
         // Wait for all tasks on this node to finish
+        println!("About to buffer_await");
         let result: Vec<()> = balancer.buffer_await().await;
         assert!(result.iter().all(|&x| x == ()));
 

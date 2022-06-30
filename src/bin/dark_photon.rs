@@ -9,7 +9,7 @@ fn main() {
     static COHERENCE_TIME: Coherence = Coherence::Daily(2);
 
     // Start Balancer
-    let mut balancer = Balancer::<()>::new(16);
+    let mut balancer = Balancer::<()>::new(32, 10);
 
     // Initialize Theory
     let theory = DarkPhoton::initialize(1.0);

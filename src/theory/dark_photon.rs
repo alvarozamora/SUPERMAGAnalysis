@@ -1,16 +1,15 @@
 use super::*;
 use std::collections::HashMap;
 use dashmap::DashMap;
-use ndarray::{Array1, ScalarOperand};
-use goertzel_filter::dft;
-use std::slice::Iter;
+// use goertzel_filter::dft;
 use std::sync::Arc;
-use rayon::iter::*;
 use crate::utils::{
     loader::Dataset,
-    // fft::find_nearest_frequency_1s,
 };
 use std::ops::{Mul, Div, Add};
+use ndrustfft::{ndfft_r2c, R2cFftHandler};
+use rayon::iter::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Contains all necessary things
 #[derive(Clone)]
@@ -18,6 +17,7 @@ pub struct DarkPhoton {
     kinetic_mixing: f64,
     vec_sph_fns: Arc<DashMap<Mode, VecSphFn>>,
 }
+
 
 lazy_static! {
     static ref DARK_PHOTON_MODES: Vec<Mode> = vec![
@@ -75,8 +75,7 @@ impl DarkPhoton
 }
 
 
-impl Theory for DarkPhoton
-{
+impl Theory for DarkPhoton {
 
     // const MODES: Modes = DARK_PHOTON_MODES;
     // const NONZERO_ELEMENTS: NonzeroElements = DARK_PHOTON_NONZERO_ELEMENTS;
@@ -93,21 +92,22 @@ impl Theory for DarkPhoton
         // Initialize projection table
         let projection_table = DashMap::new();
 
-
-
         for nonzero_element in DARK_PHOTON_NONZERO_ELEMENTS.iter() {
 
-            let (tx, rx) = std::sync::mpsc::channel();
+            // size of dataset
+            let size = chunk_dataset.iter().next().unwrap().value().field_1.len();
 
-            let combined_time_series: TimeSeries = chunk_dataset
+            // Here we iterate thrhough weights_n and not chunk_dataset because
+            // stations in weight_n are a subset (filtered) of those in chunk_dataset.
+            // Could perhaps save memory by dropping coressponding invalid datasets in chunk_dataset.
+            let combined_time_series: TimeSeries = weights_n
                 .iter()
                 .map(|key_value| {
 
                     // Unpack (key, value) pair
                     // Here, key is StationName and value = dataset
-                    let (station_name, dataset) = key_value.pair();
-
-                    tx.send(dataset.field_1.len()).unwrap();
+                    let station_name = key_value.key();
+                    let dataset = chunk_dataset.get(station_name).unwrap();
 
                     // Get product of relevant component of vector spherical harmonics and of the magnetic field. 
                     let relevant_product = match nonzero_element.assc_mode {
@@ -116,6 +116,7 @@ impl Theory for DarkPhoton
                             // Get relevant vec_sph_fn
                             let vec_sph_fn = self.vec_sph_fns.get(&mode).unwrap();
 
+                            // TODO: Change these to match definitions in the paper
                             let relevant_vec_sph = match component {
                                 Component::PolarReal =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[0].re,
                                 Component::PolarImag =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[0].im,
@@ -141,7 +142,8 @@ impl Theory for DarkPhoton
                 })
                 .collect::<HashMap<StationName, TimeSeries>>()
                 .iter()
-                .fold(TimeSeries::default(rx.recv().unwrap()), |acc, (_key, series)| acc.add(series));
+                .fold(TimeSeries::default(size), |acc, (_key, series)| acc.add(series));
+            
 
             assert!(projection_table.insert(nonzero_element.clone(), combined_time_series).is_none(), "Somehow made a duplicate entry");
         }
@@ -153,46 +155,31 @@ impl Theory for DarkPhoton
     fn calculate_data_vector(
         &self,
         projections: DashMap<NonzeroElement, TimeSeries>,
-        frequencies: &[Frequency],
-        total_time: f32,
-    ) -> DashMap<(FrequencyIndex, NonzeroElement), DFTValue> {
+    ) -> DashMap<NonzeroElement, ComplexSeries> {
 
+        // Initialize fft planner
+        let mut handler = None;
 
-        // // Find closest frequencies for given frequencies
-        // let closest_frequencies = frequencies
-        //     .iter()
-        //     .map(|&freq| find_nearest_frequency_1s(freq, total_time))
-        //     .collect::<Vec<Frequency>>();
-
-        // For each of these frequencies, and for each element, calculate DFT at that frequency
-        let result = DashMap::with_capacity(frequencies.len() * projections.len());
-
-        // For every element in `projections`, do the DFT for every frequency in `closest_frequencies`
+        // For every element in `projections`, do the FFT over the TimeSeries
         projections
             .iter()
-            .for_each(|key_value| {
+            .map(|key_value| {
 
                 // Unpack (key, value) pair from projections. value here is the nonzero projections element X
                 let (key, value) = key_value.pair();
 
-                
-                // for (frequency_index, frequency) in closest_frequencies.iter().enumerate() {
-                for (frequency_index, frequency) in frequencies.iter().enumerate() {
-
-                    // Find the key and value to insert
-                    let key: (FrequencyIndex, NonzeroElement) = (frequency_index, key.clone());
-
-                    // value is the dft at the given frequency
-                    // TODO: ensure that the dft function below actually computes the closest frequency we want.
-                    let value = dft(&value.map(|&x| x as f64).to_vec(), *frequency as f64);
-                    let value: DFTValue = Complex::new(value.re as f32, value.im as f32);
-
-                    // Insert (key, value)
-                    assert!(result.insert(key, value).is_none(), "Somehow made a duplicate entry");
+                // Initialize fft_planner if needed. This is done here because the length is not known in advance.
+                if handler.is_none() { 
+                    handler = Some(R2cFftHandler::new(value.len())); 
                 }
-            
-            });
 
-        result
+                // Calculate fft
+                let mut fft_value = ComplexSeries::zeros(value.len()/2 + 1);
+                ndfft_r2c(&value, &mut fft_value, handler.as_mut().unwrap(), 0);
+                
+                (key.clone(), fft_value)
+            
+            })
+            .collect()
     }
 }
