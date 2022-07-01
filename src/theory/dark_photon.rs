@@ -8,14 +8,14 @@ use crate::utils::{
 };
 use std::ops::{Mul, Div, Add};
 use ndrustfft::{ndfft_r2c, R2cFftHandler};
-use rayon::iter::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
+
+type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
 /// Contains all necessary things
 #[derive(Clone)]
 pub struct DarkPhoton {
     kinetic_mixing: f64,
-    vec_sph_fns: Arc<DashMap<Mode, VecSphFn>>,
+    vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>>,
 }
 
 
@@ -64,7 +64,35 @@ impl DarkPhoton
     pub fn initialize(kinetic_mixing: f64) -> Self {
 
         // Calculate vec_sphs at each station
-        let vec_sph_fns = Arc::new(vector_spherical_harmonics(DARK_PHOTON_MODES.clone().into_boxed_slice()));
+        // let vec_sph_fns = Arc::new(vector_spherical_harmonics(DARK_PHOTON_MODES.clone().into_boxed_slice()));
+        // Manual override to remove prefactors
+        let mut vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>> = Arc::new(DashMap::new());
+        
+        vec_sph_fns.insert(
+            DARK_PHOTON_NONZERO_ELEMENTS[0],
+            Arc::new(|theta: f32, phi: f32| -> f32 {
+                phi.sin()
+            }));
+        vec_sph_fns.insert(
+            DARK_PHOTON_NONZERO_ELEMENTS[1],
+            Arc::new(|theta: f32, phi: f32| -> f32 {
+                phi.cos()
+            }));
+        vec_sph_fns.insert(
+            DARK_PHOTON_NONZERO_ELEMENTS[2],
+            Arc::new(|theta: f32, phi: f32| -> f32 {
+                phi.cos() * theta.cos()
+            }));
+        vec_sph_fns.insert(
+            DARK_PHOTON_NONZERO_ELEMENTS[3],
+            Arc::new(|theta: f32, phi: f32| -> f32 {
+                - phi.sin() * theta.cos()
+            }));
+        vec_sph_fns.insert(
+            DARK_PHOTON_NONZERO_ELEMENTS[4],
+            Arc::new(|theta: f32, phi: f32| -> f32 {
+                theta.sin()
+            }));
 
         DarkPhoton {
             kinetic_mixing,
@@ -111,26 +139,28 @@ impl Theory for DarkPhoton {
 
                     // Get product of relevant component of vector spherical harmonics and of the magnetic field. 
                     let relevant_product = match nonzero_element.assc_mode {
-                        (mode, component) => {
+                        (_, component) => {
                             
                             // Get relevant vec_sph_fn
-                            let vec_sph_fn = self.vec_sph_fns.get(&mode).unwrap();
+                            let vec_sph_fn = self.vec_sph_fns.get(&nonzero_element).unwrap();
 
                             // TODO: Change these to match definitions in the paper
-                            let relevant_vec_sph = match component {
-                                Component::PolarReal =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[0].re,
-                                Component::PolarImag =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[0].im,
-                                Component::AzimuthReal =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[1].re,
-                                Component::AzimuthImag =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[1].im,
-                                _ => panic!("not included in dark photon"),
-                            };
+                            // let relevant_vec_sph = match component {
+                            //     Component::PolarReal =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[0].re,
+                            //     Component::PolarImag =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[0].im,
+                            //     Component::AzimuthReal =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[1].re,
+                            //     Component::AzimuthImag =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[1].im,
+                            //     _ => panic!("not included in dark photon"),
+                            // };
+                            // Manual Override
+                            let relevant_vec_sph = vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32);
 
                             // Note that this multiplies the magnetic field by the appropriate weights, so it's not quite the measured magnetic field
                             let relevant_mag_field = match component {
-                                Component::PolarReal => dataset.field_1.clone().mul(*weights_n.get(station_name).unwrap()).div(weights_wn),
-                                Component::PolarImag => dataset.field_1.clone().mul(*weights_n.get(station_name).unwrap()).div(weights_wn),
-                                Component::AzimuthReal => dataset.field_2.clone().mul(*weights_e.get(station_name).unwrap()).div(weights_we),
-                                Component::AzimuthImag => dataset.field_2.clone().mul(*weights_e.get(station_name).unwrap()).div(weights_we),
+                                Component::PolarReal => (&dataset.field_1).mul(*weights_n.get(station_name).unwrap()).div(weights_wn),
+                                Component::PolarImag => (&dataset.field_1).mul(*weights_n.get(station_name).unwrap()).div(weights_wn),
+                                Component::AzimuthReal => (&dataset.field_2).mul(*weights_e.get(station_name).unwrap()).div(weights_we),
+                                Component::AzimuthImag => (&dataset.field_2).mul(*weights_e.get(station_name).unwrap()).div(weights_we),
                                 _ => panic!("not included in dark photon"),
                             };
 
@@ -144,7 +174,7 @@ impl Theory for DarkPhoton {
                 .iter()
                 .fold(TimeSeries::default(size), |acc, (_key, series)| acc.add(series));
             
-
+            // Insert combined time series for this nonzero element for this chunk, ensuring no duplicate entry
             assert!(projection_table.insert(nonzero_element.clone(), combined_time_series).is_none(), "Somehow made a duplicate entry");
         }
 
