@@ -56,8 +56,7 @@ lazy_static! {
 }
 
 
-impl DarkPhoton
-{
+impl DarkPhoton {
 
     /// This initilaizes a `DarkPhoton` struct. This struct is to be used during an analysis to produce 
     /// data vectors and signals after implementing `Theory`.
@@ -69,27 +68,27 @@ impl DarkPhoton
         let mut vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>> = Arc::new(DashMap::new());
         
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[0],
+            DARK_PHOTON_NONZERO_ELEMENTS[0].clone(),
             Arc::new(|theta: f32, phi: f32| -> f32 {
                 phi.sin()
             }));
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[1],
+            DARK_PHOTON_NONZERO_ELEMENTS[1].clone(),
             Arc::new(|theta: f32, phi: f32| -> f32 {
                 phi.cos()
             }));
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[2],
+            DARK_PHOTON_NONZERO_ELEMENTS[2].clone(),
             Arc::new(|theta: f32, phi: f32| -> f32 {
                 phi.cos() * theta.cos()
             }));
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[3],
+            DARK_PHOTON_NONZERO_ELEMENTS[3].clone(),
             Arc::new(|theta: f32, phi: f32| -> f32 {
                 - phi.sin() * theta.cos()
             }));
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[4],
+            DARK_PHOTON_NONZERO_ELEMENTS[4].clone(),
             Arc::new(|theta: f32, phi: f32| -> f32 {
                 theta.sin()
             }));
@@ -104,9 +103,6 @@ impl DarkPhoton
 
 
 impl Theory for DarkPhoton {
-
-    // const MODES: Modes = DARK_PHOTON_MODES;
-    // const NONZERO_ELEMENTS: NonzeroElements = DARK_PHOTON_NONZERO_ELEMENTS;
 
     fn calculate_projections(
         &self,
