@@ -1,3 +1,5 @@
+//! A self-contained script that reads in the yearly datasets and breaks them up
+//! into more manageable daily chunks.
 use tokio::io::AsyncReadExt;
 use tokio::fs::File;
 use tokio::task::spawn;
@@ -7,8 +9,7 @@ use glob::glob;
 use futures::future::try_join_all;
 use futures::prelude::*;
 
-//! A self-contained script that reads in the yearly datasets and breaks them up
-//! into more manageable daily chunks.
+
 
 /// Size of first header in bytes
 const HEADER_SIZE: usize = 315 * 4;
@@ -373,9 +374,9 @@ fn day_since_first(day: usize, year: usize) -> usize {
         1999.. => {
 
             // Calculate how many days there were in the last year
-            let days_in_last_year = if ( year - 1 ) % 4 == 0 { 366 - 1 } else { 365 - 1 };
+            let days_in_last_year = if ( year - 1 ) % 4 == 0 { 366 } else { 365 };
 
-            return day + 1 + day_since_first(days_in_last_year, year - 1)
+            return day + day_since_first(days_in_last_year, year - 1)
         },
         _ => panic!("the year provided is before there was any data")
     }
