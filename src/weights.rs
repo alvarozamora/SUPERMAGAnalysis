@@ -26,7 +26,7 @@ pub struct Weights {
     pub e: DashMap<Index, DashMap<StationName, Weight>>,
     pub wn: DashMap<Index, TimeSeries>,
     pub we: DashMap<Index, TimeSeries>,
-    pub mode: Coherence,
+    pub stationarity: Stationarity,
 }
 
 
@@ -135,15 +135,15 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
     /// This runs an analysis for a given theory. It chunks the data into the specified intervals,
     /// calculates the inverse white noise (i.e. weights) (similar to eq 13 and 14 in the paper)
     ///  and calculates the data vector on said chunks of data.
-    pub async fn new(mode: Coherence, theory: T, balancer: &mut Manager<()>) -> Arc<Self>
+    pub async fn new(stationarity: Stationarity, theory: T, balancer: &mut Manager<()>) -> Arc<Self>
     {
 
         println!("Running Analysis");
 
         // Number of days per chunk
-        let days: usize = match mode {
-            Coherence::Yearly => todo!(),
-            Coherence::Daily(days) => days,
+        let days: usize = match stationarity {
+            Stationarity::Yearly => todo!(),
+            Stationarity::Daily(days) => days,
         };
 
         // Grab dataset loader for the chunks
@@ -155,7 +155,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 e: DashMap::new(),
                 wn: DashMap::new(),
                 we: DashMap::new(),
-                mode,
+                stationarity,
         });
 
         // Initialize empty data vector
