@@ -342,7 +342,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
 
 #[derive(Copy, Clone)]
-pub enum Coherence {
+pub enum Stationarity {
     Yearly,
     Daily(usize),
 }

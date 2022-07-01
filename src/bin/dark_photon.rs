@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 fn main() {
 
-    // Coherence time in days
-    static COHERENCE_TIME: Coherence = Coherence::Daily(2);
+    // Stationarity time in days
+    static STATIONARITY_TIME: Stationarity = Stationarity::Daily(2);
 
     // Start Balancer
     let mut balancer = Balancer::<()>::new(32, 10);
@@ -15,7 +15,7 @@ fn main() {
     let theory = DarkPhoton::initialize(1.0);
 
     // Compute weights for this coherence time
-    let analysis_fut = Analysis::new(COHERENCE_TIME, theory, &mut balancer.manager);
+    let analysis_fut = Analysis::new(STATIONARITY_TIME, theory, &mut balancer.manager);
     let analysis = balancer.runtime.block_on(analysis_fut);
 
     println!("calculated weights on rank {}", balancer.manager.rank);
