@@ -1,4 +1,4 @@
-use supermag_analysis::weights::{Analysis, Coherence};
+use supermag_analysis::weights::{Analysis, Stationarity};
 use supermag_analysis::utils::async_balancer::Balancer;
 use supermag_analysis::theory::dark_photon::DarkPhoton;
 use std::sync::Arc;
