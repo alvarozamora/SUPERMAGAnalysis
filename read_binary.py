@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 
 # An example script for reading binary data
 
-# Open the file "CAN_" for reading in binary mode "rb"
+# Open the file "CAN_0" for reading in binary mode "rb"
 filename = "CAN_0"
 file = open("CAN_0", "rb")
 
