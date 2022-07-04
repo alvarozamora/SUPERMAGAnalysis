@@ -16,6 +16,8 @@ use futures::future::join_all;
 use ndarray::Axis;
 use rayon::prelude::*;
 use rayon::iter::*;
+use crate::weights::{Coherence, Stationarity};
+use crate::theory::NonzeroElement;
 
 pub type TimeSeries = Array1<f32>;
 pub type Index = usize;
@@ -505,6 +507,48 @@ fn validate_buffer_size(buffer: &[u8], expected_size: usize, year: usize) -> Res
 }
 
 
+
+/// This is a recursive function that returns the number of days since the first day there was data.
+fn day_since_first(day: usize, year: usize) -> usize {
+
+    match year {
+        1998 => day,
+        1999.. => {
+
+            // Calculate how many days there were in the last year
+            let days_in_last_year = if ( year - 1 ) % 4 == 0 { 366 } else { 365 };
+
+            return day + day_since_first(days_in_last_year, year - 1)
+        },
+        _ => panic!("the year provided is before there was any data")
+    }
+}
+
+#[test]
+fn test_day_since_first() {
+
+    type Day = usize;
+    type Year = usize;
+
+    // 1st day ever (0th day)
+    assert_eq!(0, day_since_first(0, 1998));
+
+    // 101st day of the first year (100th day, zero-indexed)
+    assert_eq!(100, day_since_first(100, 1998));
+
+    // First day of the second year
+    assert_eq!(365, day_since_first(0, 1999));
+
+    // Testing C08_4029 (which was apparently wrongly indexed)
+    assert_eq!(4018, day_since_first(0, 2009));
+
+    // The day this unit test was written 
+    // (182nd day of 2022, zero-indexed)
+    const TODAY: (Day, Year) = (181, 2022);
+    assert_eq!(8947, day_since_first(TODAY.0, TODAY.1));
+}
+
+
 /// Simple trait which converts all values in a collection to `f32`.
 pub trait Tof32{
     fn to_f32(&mut self) -> Vec<f32>;
@@ -533,3 +577,56 @@ impl Default for Dataset {
         }
     }
 }
+
+
+
+
+
+
+// /// This function takes valid stationarity chunks and rechunks them into coherence times. 
+// /// Note that the return key type `Index` is no longer the stationarity chunk index, but rather
+// /// the coherence chunk index.
+// pub fn rechunk_into(
+//     stationarity_chunks: Arc<DashMap<Index, DashMap<NonzeroElement, TimeSeries>>>,
+//     stationarity: Stationarity,
+//     coherence: Coherence,
+// ) -> DashMap<Index, DashMap<NonzeroElement, TimeSeries>> {
+
+//     // Initialize the return value
+//     let coherence_chunks = DashMap::new();
+
+//     // Find valid stationarity chunks
+//     let stationarity_days = match stationarity {
+//         Stationarity::Daily(days) => days,
+//         _ => todo!("yearly stationarity not implemented"),
+//     };
+
+//     // Calculate number of coherence times in the dataset
+//     let num_coherence_times: usize = match coherence {
+//         Coherence::Days(days) => {
+
+//             // Find candidate chunks
+//             DATA_DAYS
+//                 .step_by(days)
+//                 .map(|x| (x..).take(days))
+//                 .collect::<Vec<_>>()
+//                 .into_par_iter()
+//                 .for_each(|days| {
+                    
+//                 });
+
+//             5
+//         },
+//         Coherence::Seconds(seconds) => {
+
+//             5
+//         }
+//     }
+ 
+//     coherence_chunks
+// }
+
+
+// fn day_exists_in_chunks(day: usize, chunks: &[Index], stationarity: Stationarity) -> bool {
+
+// }

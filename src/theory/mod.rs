@@ -49,8 +49,8 @@ pub trait Theory: Clone + Send {
     // This calculates the pre-DFT data vector X^n_i's for a given theory.
     fn calculate_projections(
         &self,
-        weights_n: Arc<DashMap<StationName, f32>>,
-        weights_e: Arc<DashMap<StationName, f32>>,
+        weights_n: DashMap<StationName, f32>,
+        weights_e: DashMap<StationName, f32>,
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
         chunk_dataset: DashMap<StationName, Dataset>,
