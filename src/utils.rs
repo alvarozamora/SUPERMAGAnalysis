@@ -141,3 +141,22 @@ fn test_maxprime_multiple_primes_prime_bigger_number() {
     assert_eq!(maxprime(150), 5);
 }
 
+
+#[test]
+#[ignore] /* u32 max is O(4 billion), so this takes a long time */
+fn test_f64_u32_casting() {
+    use rayon::iter::ParallelIterator;
+    (0..std::u32::MAX)
+        .into_par_iter()
+        .for_each(|i| {
+            assert_eq!(i, (i as f64 + 0.1) as u32);
+        });
+}
+
+#[test]
+#[should_panic] /* this is why we need f64s for u32 casting */
+fn test_f32_u32_casting() {
+    for i in 0..std::u32::MAX {
+        assert_eq!(i, (i as f32 + 0.1) as u32);
+    }
+}
