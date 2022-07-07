@@ -345,7 +345,6 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             theory,
             projections,
             data_vector,
-            valid_secs,
         })
     }
 }
