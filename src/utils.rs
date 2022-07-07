@@ -55,6 +55,27 @@ pub fn get_largest_contiguous_subset(set: &[usize]) -> (usize, usize) {
 }
 
 
+/// Given a number `n`, this function finds its largest prime factor
+pub fn maxprime(n: usize) -> usize {
+
+    // Deal with base case
+    if n == 1 { return 1 }
+
+    // Find upper_bound for checks
+    let upper_bound = (n as f64).sqrt() as usize;
+
+    // Iterate through all odd numbers between 2 and the upper_bound
+    for i in (2..=2).chain((3..=upper_bound).step_by(2)) {
+        if n % i == 0 {
+            return maxprime(n/i) 
+        }
+    }
+
+    // Because we are iterating up, this will return the largest prime factor
+    return n
+}
+
+
 #[test]
 fn test_get_longest_streak_when_all_is_streak() {
 
@@ -86,3 +107,37 @@ fn test_get_longest_and_latest_streak_single() {
     let longest_streak = get_largest_contiguous_subset(&set);
     assert_eq!(longest_streak, (1, 9))
 }
+
+#[test]
+fn test_maxprime_small_prime() {
+
+    assert_eq!(maxprime(7), 7);
+}
+
+#[test]
+fn test_maxprime_bigger_prime() {
+
+    assert_eq!(maxprime(53), 53);
+}
+
+
+#[test]
+fn test_maxprime_prime_squared() {
+
+    assert_eq!(maxprime(49), 7);
+}
+
+
+#[test]
+fn test_maxprime_multiple_primes() {
+
+    assert_eq!(maxprime(24), 3);
+}
+
+
+#[test]
+fn test_maxprime_multiple_primes_prime_bigger_number() {
+
+    assert_eq!(maxprime(150), 5);
+}
+
