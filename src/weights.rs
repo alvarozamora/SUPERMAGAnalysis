@@ -408,6 +408,8 @@ async fn calculate_weights_for_chunk(
     
 
 
+    // local_valid_seconds: Arc<DashMap<usize /* index */, usize /* count */>>,
+) {
     datasets
         .iter()
         .for_each(|dataset| {
@@ -439,6 +441,16 @@ async fn calculate_weights_for_chunk(
                     .unzip();
                 (Array1::from_vec(entries), Array1::from_vec(field)) 
             };
+
+            // // Mark valid seconds
+            // let num_seconds_per_chunk: usize = local_wn.len();
+            // let first_second: usize = index*num_seconds_per_chunk;
+            // valid_entries_1
+            //     .iter()
+            //     .fold(first_second, |sec, valid| {
+            //         assert!(local_valid_seconds.insert(sec, *valid as usize).is_none(), "Error: duplicate entry in valid_seconds");
+            //         sec + 1
+            //     });
 
             if cfg!(debug_assertions) {
                 println!(
