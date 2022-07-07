@@ -61,8 +61,8 @@ pub trait Theory: Clone + Send {
         chunk_dataset: &DashMap<StationName, Dataset>,
     ) -> DashMap<NonzeroElement, TimeSeries>;
 
-    // /// This calculates the theoretical signal expected for the Earth's magnetic field
-    // /// for a given set of coordinates.
+    /// This calculates the theoretical signal expected for the Earth's magnetic field
+    /// for a given set of coordinates.
     fn calculate_data_vector(
         &self,
         projections: DashMap<NonzeroElement, TimeSeries>,
