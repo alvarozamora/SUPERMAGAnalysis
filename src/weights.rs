@@ -365,23 +365,21 @@ pub enum Coherence {
     Seconds(usize),
 }
 
-const RESOLUTION: f32 = 1.0;
 
-
-// Calculate the coherence 
-fn coherence_times(total_time: f32, threshold: f32, min_periods: usize) -> Vec<usize> {
+/// Calculate the coherence times
+fn coherence_times(total_time: f64, threshold: f64) -> Vec<usize> {
 
     // Initialize return value
     let mut times = vec![];
 
-    // Find max in in eq (??) TODO: check rounding is safe
+    // Find max in in eq (??)
     let max_n: usize = (-0.5*(1_000_000.0 / total_time).ln()/(1.0 + threshold).ln()).round() as usize;
 
     for n in 0..=max_n {
 
         // Find the raw coherence time
-        let raw_coherence_time: f32 = total_time as f32 / (1.0 + threshold as f32).powi(2*n as i32);
-        let rounded = raw_coherence_time.round() as usize; //  TODO: check rounding is safe
+        let raw_coherence_time: f64 = total_time / (1.0 + threshold).powi(2*n as i32);
+        let rounded = raw_coherence_time.round() as usize;
 
         // Find number in [rounded-10, .., rounded+10] with smallest max prime
         let mut number = 0;
@@ -398,6 +396,8 @@ fn coherence_times(total_time: f32, threshold: f32, min_periods: usize) -> Vec<u
         times.push(number)
     }
 
+    // Values should be in descending order.
+    // Return values in descending order. 
     times
 }
 
