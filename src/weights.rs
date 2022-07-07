@@ -239,15 +239,25 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     }
 
                     // Local hashmaps and time series
-                    let local_hashmap_n: DashMap<StationName, Weight> = Arc::new(DashMap::with_capacity(datasets.len()));
-                    let local_hashmap_e: DashMap<StationName, Weight> = Arc::new(DashMap::with_capacity(datasets.len()));
-                    let local_wn: RwLock<TimeSeries> = Arc::new(RwLock::new(Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY])));
-                    let local_we: RwLock<TimeSeries> = Arc::new(RwLock::new(Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY])));
+                    let local_hashmap_n: DashMap<StationName, Weight> =DashMap::with_capacity(datasets.len());
+                    let local_hashmap_e: DashMap<StationName, Weight> =DashMap::with_capacity(datasets.len());
+                    let mut local_wn: TimeSeries = Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY]);
+                    let mut local_we: TimeSeries = Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY]);
                     
+                    // Calculate weights based on datasets for this chunk (stationarity period)
+                    calculate_weights_for_chunk(
+                        index,
+                        &local_hashmap_n,
+                        &local_hashmap_e,
+                        &mut local_wn,
+                        &mut local_we,
+                        &datasets,
+                    ).await;
                     debug_print!("Finished weights for index {index}");
                     debug_print!("local_hashmap_n has {} entries", local_hashmap_n.len());
                     debug_print!("local_hashmap_n has {} entries", local_hashmap_n.len());
                     // e.g. all stations have nans for all values for this chunk
+                    if local_hashmap_n.len() < 0*T::MIN_STATIONS { 
                         println!("Invalid chunk, as there are less than {} stations with data in this chunk. Proceeding to next chunk", T::MIN_STATIONS);
                         return ()
                     } else if local_wn.iter().any(|&x| x == 0.0_f32) {
@@ -255,37 +265,41 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                         return ()
                     }
 
-                    // Calculate projections for this chunk
-                    println!("calculating projections");
+                    // Calculate projections for this chunk. 
+                    // This is done here despite potentially discarding result later if chunk is not in largest contiguous subset because
+                    // we do not want to repeat I/O with hundreds of gigabytes of data. I.e. we already have the data in memory here.
+                    debug_print!("calculating projections");
                     let chunk_projections: DashMap<NonzeroElement, TimeSeries> = local_theory.calculate_projections(
-                        Arc::clone(&local_hashmap_n),
-                        Arc::clone(&local_hashmap_e),
-                        &*local_wn.read(),
-                        &*local_we.read(),
-                        datasets
+                        &local_hashmap_n,
+                        &local_hashmap_n,
+                        &local_wn,
+                        &local_we,
+                        &datasets
                     );
                     assert!(local_projections.insert(index, chunk_projections).is_none(), "A duplicate entry was made");
-
-                    // Add to dashmap
-                    local_weights.n.insert(index, Arc::try_unwrap(local_hashmap_n).expect("An Arc survived"));
-                    local_weights.e.insert(index, Arc::try_unwrap(local_hashmap_e).expect("An Arc survived"));
+                    
+                    // Add weights to dashmap
+                    local_weights.n.insert(index,local_hashmap_n);
+                    local_weights.e.insert(index,local_hashmap_e);
+                    // This is completely unnecessary but was a cool piece of code that I wrote to async-ify dashmap access.
+                    // Keeping it for future reference. Should not do much for our particular application, and may even positively
+                    // affect performance during simultaneous attempts to access the same shard.
                     loop {
                         match local_weights.wn.try_get_mut(&index) {
-                            TryResult::Present(_) => { panic!("some other thread somehow worked on this chunk") },    //array.add_assign(&wn_weight); break },
-                            TryResult::Absent => { local_weights.wn.insert(index, Arc::try_unwrap(local_wn).expect("An Arc survived").into_inner()); break },
+                            TryResult::Present(_) => { panic!("some other thread somehow worked on this chunk") },
+                            TryResult::Absent => { local_weights.wn.insert(index, local_wn);  break },
                             TryResult::Locked => { tokio::task::yield_now().await },
                         }
                     }
                     loop {
                         match local_weights.we.try_get_mut(&index) {
-                            TryResult::Present(_) => { panic!("some other thread somehow worked on this chunk") },    //array.add_assign(&we_weight); break },
-                            TryResult::Absent => { local_weights.we.insert(index, Arc::try_unwrap(local_we).expect("An Arc survived").into_inner()); break },
+                            TryResult::Present(_) => { panic!("some other thread somehow worked on this chunk") },
+                            TryResult::Absent => { local_weights.we.insert(index, local_we);  break },
                             TryResult::Locked => { tokio::task::yield_now().await },
                         }
                     }
-                }).await.unwrap()})
-            );
-           
+                }).await.unwrap()
+            }));
         }
 
         // Wait for all tasks on this node to finish, and check that they all succeeded
