@@ -494,14 +494,23 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         // Chuck all data prior to 2003
         // Do coordinate transformation: linearly interpolate between the values in `IGRF_declinations_for_1sec.txt`. The values given are for the start of the 180th day of each year.
 
-        //     for coherence_time in coherence_times {
-        
-        //         // This is the chunked data for this particular coherence time
-        //         let coherence_chunk = rechunk_into(
-        //             projections, 
-        //             stationarity,
-        //             coherence,
-        //         );
+        // Calculate coherence_times: a vector containing the integer number of seconds for every
+        // coherence time we are considering.
+        //
+        // projections_complete is the map containing the stitched-together timeseries
+        // so the length of one of the time series is the total amount of time we are analyzing.
+        let total_secs: usize = projections_complete.iter().next().unwrap().value().len();
+        let total_time = total_secs as f64;
+        let coherence_times: Vec<usize> = {
+
+            // percent level accuracy of all of the frequencies in a frequency bins
+            const THRESHOLD: f64 = 0.03;
+
+            coherence_times(total_time, THRESHOLD)
+        };
+
+        // Calculate frequency bins from coherence time
+        let frequency_bins: Vec<FrequencyBin> = frequencies_from_coherence_times(&coherence_times);
 
         //         // TODO: FFT
 
