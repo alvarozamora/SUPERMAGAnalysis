@@ -401,12 +401,33 @@ fn coherence_times(total_time: f32, threshold: f32, min_periods: usize) -> Vec<u
     times
 }
 
+#[test]
+fn test_frequencies_from_coherence_times() {
 
-async fn calculate_weights_for_chunk(
-    local_hashmap_n: Arc<DashMap<>>
-) {
-    
+    // The function that generates these returns them in descending order. lets do the same
+    let coherence_times = vec![100, 4];
 
+    // Calculate frequency bins
+    let frequency_bins = frequencies_from_coherence_times(&coherence_times);
+
+    frequency_bins
+        .iter()
+        .zip(
+        vec![
+            FrequencyBin {
+                lower: 1.0 / 100.0,
+                multiples: 0..=24,
+            },
+            FrequencyBin {
+                lower: 1.0 / 4.0,
+                multiples: 1..=3,
+            }
+        ].iter()
+    ).for_each(|(bin_a, bin_b)| {
+        assert_eq!(*bin_a, *bin_b, "frequency bins are not the same");
+    })
+        
+}
 
 async fn calculate_weights_for_chunk(
     index: Index,
