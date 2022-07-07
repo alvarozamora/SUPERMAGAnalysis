@@ -401,6 +401,56 @@ fn coherence_times(total_time: f32, threshold: f32, min_periods: usize) -> Vec<u
     times
 }
 
+/// Given a complete set of `coherence_times`, sorted in descending order, calculates
+/// the corresponding frequency bins
+fn frequencies_from_coherence_times(coherence_times: &Vec<usize>) -> Vec<FrequencyBin> {
+    
+    // Calculate base frequencies, i.e. reciprocal of coherence times
+    // Since coherence_times is in descending order, these will be in ascending order
+    let base_frequencies: Vec<f64> = coherence_times
+        .iter()
+        .map(|&x| (x as f64).recip())
+        .collect();
+
+    // This constructs all frequency bins except for the highest one
+    let mut frequency_bins: Vec<FrequencyBin> = base_frequencies
+        .windows(2) // Get all neighboring pairs in `base_frequencies`
+        .enumerate()
+        .map(|(bin_index, pair)| {
+            
+            // Unpack pair
+            let (lower, higher) = (pair[0], pair[1]);
+            assert!(higher > lower, "frequencies are not in correct order");
+
+            // Find start and end multiples of frequency
+            let start = if bin_index == 0 { 0 } else { 1 };
+            let mut end = (higher / lower) as usize;
+            if end as f64 * lower == higher { end -= 1; }
+
+            assert!(end as f64 * lower < higher, "highest frequency in bin is higher than lowest in next bin");
+
+            // Return bin containing all frequencies in [lower, higher), in ascending order
+            return FrequencyBin { lower: lower, multiples: start..=end }
+
+        }).collect();
+
+    // Add highest frequency bin
+    frequency_bins.push({
+        
+        let last_coherence_time_in_seconds: usize = *coherence_times.last().unwrap();
+        let highest_frequency: usize = last_coherence_time_in_seconds - 1;
+        let highest_frequency_bin_start = (last_coherence_time_in_seconds as f64).recip();
+
+        FrequencyBin {
+            lower: highest_frequency_bin_start,
+            multiples: 1..=highest_frequency,
+        }
+    });
+
+    // Return bin
+    frequency_bins
+}
+
 #[test]
 fn test_frequencies_from_coherence_times() {
 
