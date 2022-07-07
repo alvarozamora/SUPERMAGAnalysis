@@ -77,7 +77,6 @@ pub struct Analysis<T: Theory + Send> {
     pub theory: T,
     pub projections: Arc<DashMap<Index, DashMap<NonzeroElement, TimeSeries>>>,
     pub data_vector: DashMap<Index, DashMap<NonzeroElement, ComplexSeries>>,
-    pub valid_secs: Arc<DashMap<Index, usize>>,
 }
 
 impl<T: Theory + Send + Sync + 'static> Analysis<T> {
