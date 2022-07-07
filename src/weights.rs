@@ -1,17 +1,52 @@
 use crate::{
     constants::*,
+    utils::*,
     utils::loader::*,
     utils::async_balancer::*,
     theory::*,
 };
-use ndarray::{Array1, arr1};
+use mpi::{topology::Communicator, traits::Root};
+use ndarray::{s, Array1, arr1, ArrayViewMut, Array2};
 use dashmap::DashMap;
-use std::sync::Arc;
+use std::{sync::Arc, ops::RangeInclusive};
 use parking_lot::RwLock;
+use std::collections::HashSet;
 use std::ops::AddAssign;
 use dashmap::try_result::TryResult;
 use std::ops::Range;
-// use rayon::iter::ParallelIterator;
+use rayon::iter::{ParallelIterator, IntoParallelIterator, IntoParallelRefIterator};
+use mpi::point_to_point::{Source, Destination};
+use ndrustfft::{ndfft_r2c, Complex, R2cFftHandler};
+
+macro_rules! debug {
+    ($($e:expr),+) => {
+        {
+            #[cfg(debug_assertions)]
+            {
+                dbg!($($e),+)
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                ($($e),+)
+            }
+        }
+    };
+}
+
+macro_rules! debug_print {
+    ($($e:expr),+) => {
+        {
+            #[cfg(debug_assertions)]
+            {
+                println!($($e),+)
+            }
+            #[cfg(not(debug_assertions))]
+            {
+                ($($e),+)
+            }
+        }
+    };
+}
 
 
 type Index = usize;
