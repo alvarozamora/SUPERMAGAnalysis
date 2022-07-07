@@ -306,9 +306,188 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         println!("About to buffer_await");
         let result: Vec<()> = balancer.buffer_await().await;
         assert!(result.iter().all(|&x| x == ()));
+        balancer.barrier();
 
-        // TODO: GLOBAL SYNC HERE
+        // Flatten all chunks over which this largest contiguous subset spans
+        // to get T::NONZERO_ELEMENTS number of large series. This essentially flattens
+        // `projections` from DashMap<Index, DashMap<NonzeroElement, TimeSeries>> to
+        // DashMap<NonzeroElement, TimeSeries> (i.e. the complete, stiched-together time series)
+        let projections_complete: DashMap<NonzeroElement, TimeSeries> = {
 
+            // First communicate about which nonzero chunks were obtained
+            let my_nonzero_chunks: Vec<Index> = projections
+                .iter()
+                .fold(vec![], |mut v, pair| { v.push(*pair.key()); v});
+            let mut all_nonzero_chunks = my_nonzero_chunks.clone();
+            
+            let empty: Vec<usize> = vec![std::usize::MAX, std::usize::MAX, std::usize::MAX];
+
+            // Synchronize nonzero chunks for every rank
+            for rank in 0..balancer.size {
+
+                if rank == balancer.rank {
+
+                     // If it is your turn, broadcast to all ranks `send_to_rank` that are not yourself
+                    for send_to_rank in 0..balancer.size {
+
+                        if send_to_rank != rank {
+                            if my_nonzero_chunks.len() > 0 {
+                                debug_print!("rank {rank} about to send {} nonzero chunks {:?} to {send_to_rank}", my_nonzero_chunks.len(), &my_nonzero_chunks);
+                                balancer.world.process_at_rank(send_to_rank as i32).send(&my_nonzero_chunks);
+                            } else {
+                                // send empty
+                                debug_print!("rank {rank} about to send empty to {send_to_rank}");
+                                balancer.world.process_at_rank(send_to_rank as i32).send(&empty);
+                            }
+
+                        } 
+                    }
+        
+                } else {
+                    
+                    // If it is not your turn to broadcast, receive other_nonzero_chunks and append
+                    let (mut other_nonzero_chunks, status) = balancer.world
+                        .any_process()
+                        .receive_vec::<Index>();
+
+                    debug_print!("rank {} received from rank {}: {:?}", balancer.rank, status.source_rank(), &other_nonzero_chunks);
+
+                    if empty != other_nonzero_chunks {
+                        all_nonzero_chunks.append(&mut other_nonzero_chunks);
+                    }
+                }
+
+                // Barrier, for safety. Don't think we necessarily need it here and not after this scope
+                balancer.barrier();
+            }
+
+            // After receiving all nonzero chunks, sort. Now, all ranks should have this same vector.
+            all_nonzero_chunks.sort();
+
+            // We first initialize a dashmap with T::NONZERO_ELEMENTS number of zeroed series
+            //  to which we will add nonzero chunks
+            let nonzero_elements: HashSet<NonzeroElement> = T::get_nonzero_elements();
+
+            // Iterate through sorted chunk index array and send/receive chunks
+            for nonzero_chunk in all_nonzero_chunks {
+
+                if my_nonzero_chunks.contains(&nonzero_chunk) {
+
+                    // If you hold the data to this chunk, send it to other ranks
+                    
+                    // Get all nonzero elements for this theory for this chunk
+                    let chunk_data_map = projections.get(&nonzero_chunk).unwrap();
+
+                    // Iterate through and send all nonzero elements
+                    for element in &nonzero_elements {
+
+                        // Get data for this element from the chunk data map
+                        let element_data = chunk_data_map.get(element).unwrap();
+                        // This clone is theoretically unnecessary. It's done here to use a type (vec) that impls necessary traits to send
+                        let element_data: Vec<f32> = element_data.clone().into_raw_vec();
+                        for send_to_rank in 0..balancer.size {
+
+                            if send_to_rank != balancer.rank {
+                                debug_print!("Rank {} about to send {} f32s [{:?} .. ] for index {} to rank {}", balancer.rank, element_data.len(), &element_data[..3], nonzero_chunk, send_to_rank);
+
+                                balancer.world
+                                    .process_at_rank(send_to_rank as i32)
+                                    .send(&element_data); 
+                            }
+                        }
+
+                        // Wait for all other ranks to receive this nonzero element
+                        balancer.barrier();
+                    }
+                } else {
+         
+                    // Otherwise, receive nonzero chunk
+                    let chunk_map: DashMap<NonzeroElement, TimeSeries> = DashMap::new();
+
+                    // Iterate through and receive all nonzero elements
+                    for element in &nonzero_elements {
+
+                        // let mut buffer_for_recieving: Vec<f32> = Vec::with_capacity(size); // This heap allocation is necessary, and ownership will be passed onto the dashmap
+
+                        debug_print!("rank {} about to receive f32s", balancer.rank);
+                        let (buffer_for_recieving, status) = balancer.world
+                            .any_process()
+                            .receive_vec::<f32>();
+
+                        // Convert buffer into array
+                        let chunk_to_insert = TimeSeries::from_vec(buffer_for_recieving);
+
+                        // Insert chunk into chunk_map
+                        chunk_map.insert(element.clone(), chunk_to_insert);
+                        
+                        // Wait for all other ranks to receive this nonzero element
+                        balancer.barrier();
+                    }
+
+                    // Insert chunk map into projections
+                    projections
+                        .insert(nonzero_chunk, chunk_map);
+                }
+            }
+
+            // Now that all ranks have all of the data, need to find longest contiguous subset of chunks
+            let (size, starting_value): (usize, usize) = {
+            
+                // To do this we first gather all chunks
+                let set: Vec<usize> = projections
+                    .par_iter_mut()
+                    .map(|pair| *pair.key())
+                    .collect();
+
+                // Then, return largest contiguous subset
+                get_largest_contiguous_subset(&set)
+            };
+            println!("rank {}: longest contiguous subset of chunks begins at {starting_value} and has length {size} chunks", balancer.rank);
+
+            // TODO: generalize to yearly
+            let secs_per_chunk = SECONDS_PER_DAY * days;
+
+            let complete_series = Arc::new(DashMap::new());
+            for element in &nonzero_elements {
+                let empty_array = TimeSeries::zeros(size * secs_per_chunk);
+                debug_print!("initializing map element {:?} with zeros array of len {}={}", element, size * secs_per_chunk, empty_array.len());
+                complete_series.insert(element.clone(), empty_array);
+            }
+
+            projections
+                .iter()
+                .for_each(|chunk| {
+
+                    // Get chunk and it's chunk_map
+                    let (&current_chunk, chunk_map) = chunk.pair();
+
+                    if !in_longest_subset(current_chunk, size, starting_value) {
+                        return ()
+                    }
+
+                    chunk_map
+                        .iter()
+                        .for_each(|element| {
+                        
+                            // get element and its correpsonding series
+                            let (element, series) = element.pair();
+
+                            // Insert array into complete series
+                            // TODO: THIS ASSUMES ALL CHUNKS ARE THE SAME LENGTH.
+                            // NEED TO CHANGE FOR YEARLY STATIONARITY AND PERHAPS THE EDGE CHUNKS.
+                            let start_index = (current_chunk-starting_value)*series.len();
+                            let end_index = start_index + series.len();
+
+                            complete_series
+                                .get_mut(element)
+                                .unwrap()
+                                .slice_mut(s![start_index..end_index])
+                                .assign(&series);
+                        })
+                });
+            
+            Arc::try_unwrap(complete_series).expect("An arc somehow survived")
+        };
 
         // // After rechunking into coherence times, do FFT + noise + bayesian analysis + anything else for every 
         // {
