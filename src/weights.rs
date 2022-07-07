@@ -510,40 +510,17 @@ fn in_longest_subset(chunk: usize, size: usize, starting_value: usize) -> bool {
     && (chunk < (starting_value + size))
 }
 
-    // Because we are iterating up, this will return the largest prime factor
-    return n
-}
 
+fn next_power_of_two(number: usize) -> usize {
 
-#[test]
-fn test_maxprime_small_prime() {
+    // Initialize result with 2
+    let mut next_power = 2;
 
-    assert_eq!(maxprime(7), 7);
-}
+    // Find next power of two iteratively 
+    while next_power < number {
+        next_power *= 2;
+    }
 
-#[test]
-fn test_maxprime_bigger_prime() {
-
-    assert_eq!(maxprime(53), 53);
-}
-
-
-#[test]
-fn test_maxprime_prime_squared() {
-
-    assert_eq!(maxprime(49), 7);
-}
-
-
-#[test]
-fn test_maxprime_multiple_primes() {
-
-    assert_eq!(maxprime(24), 3);
-}
-
-
-#[test]
-fn test_maxprime_multiple_primes_prime_bigger_number() {
-
-    assert_eq!(maxprime(150), 5);
+    // Return next power of two
+    next_power
 }
