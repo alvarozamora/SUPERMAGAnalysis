@@ -46,14 +46,15 @@ pub trait Theory: Clone + Send {
     // const MODES: Modes;
     // const NONZERO_ELEMENTS: NonzeroElements;
 
-    // This calculates the pre-DFT data vector X^n_i's for a given theory.
+    /// This calculates the pre-FFT data vector X^n_i's for a given theory. It combines data from many
+    /// stations into a smaller subset of time series, weighted by their noise.
     fn calculate_projections(
         &self,
-        weights_n: DashMap<StationName, f32>,
-        weights_e: DashMap<StationName, f32>,
+        weights_n: &DashMap<StationName, f32>,
+        weights_e: &DashMap<StationName, f32>,
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
-        chunk_dataset: DashMap<StationName, Dataset>,
+        chunk_dataset: &DashMap<StationName, Dataset>,
     ) -> DashMap<NonzeroElement, TimeSeries>;
 
     // /// This calculates the theoretical signal expected for the Earth's magnetic field

@@ -109,11 +109,11 @@ impl Theory for DarkPhoton {
 
     fn calculate_projections(
         &self,
-        weights_n: Arc<DashMap<StationName, f32>>,
-        weights_e: Arc<DashMap<StationName, f32>>,
+        weights_n: &DashMap<StationName, f32>,
+        weights_e: &DashMap<StationName, f32>,
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
-        chunk_dataset: DashMap<StationName, Dataset>,
+        chunk_dataset: &DashMap<StationName, Dataset>,
     ) -> DashMap<NonzeroElement, TimeSeries> {
 
         // Initialize projection table
