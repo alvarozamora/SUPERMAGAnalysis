@@ -504,18 +504,11 @@ async fn calculate_weights_for_chunk(
 /// Given a number `n`, this function finds its largest prime factor
 fn maxprime(n: usize) -> usize {
 
-    // Deal with base case
-    if n == 1 { return 1 }
+fn in_longest_subset(chunk: usize, size: usize, starting_value: usize) -> bool {
 
-    // Find upper_bound for checks
-    let upper_bound = (n as f64).sqrt() as usize;
-
-    // Iterate through all odd numbers between 2 and the upper_bound
-    for i in (2..=2).chain((3..=upper_bound).step_by(2)) {
-        if n % i == 0 {
-            return maxprime(n/i) 
-        }
-    }
+    (chunk >= starting_value)
+    && (chunk < (starting_value + size))
+}
 
     // Because we are iterating up, this will return the largest prime factor
     return n
