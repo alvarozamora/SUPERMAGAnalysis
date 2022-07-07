@@ -136,10 +136,10 @@ impl Theory for DarkPhoton {
                     let station_name = key_value.key();
                     let dataset = chunk_dataset.get(station_name).unwrap();
 
-                    // Get product of relevant component of vector spherical harmonics and of the magnetic field. 
+                    // Get product of relevant component of vector spherical harmonics and of the magnetic field.
                     let relevant_product = match nonzero_element.assc_mode {
                         (_, component) => {
-                            
+
                             // Get relevant vec_sph_fn
                             let vec_sph_fn = self.vec_sph_fns.get(&nonzero_element).unwrap();
 
@@ -172,7 +172,7 @@ impl Theory for DarkPhoton {
                 .collect::<HashMap<StationName, TimeSeries>>()
                 .iter()
                 .fold(TimeSeries::default(size), |acc, (_key, series)| acc.add(series));
-            
+
             // Insert combined time series for this nonzero element for this chunk, ensuring no duplicate entry
             assert!(projection_table.insert(nonzero_element.clone(), combined_time_series).is_none(), "Somehow made a duplicate entry");
         }
