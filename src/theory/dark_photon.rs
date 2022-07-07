@@ -213,16 +213,16 @@ impl Theory for DarkPhoton {
                 let (key, value) = key_value.pair();
 
                 // Initialize fft_planner if needed. This is done here because the length is not known in advance.
-                if handler.is_none() { 
-                    handler = Some(R2cFftHandler::new(value.len())); 
+                if handler.is_none() {
+                    handler = Some(R2cFftHandler::new(value.len()));
                 }
 
                 // Calculate fft
                 let mut fft_value = ComplexSeries::zeros(value.len()/2 + 1);
                 ndfft_r2c(&value, &mut fft_value, handler.as_mut().unwrap(), 0);
-                
+
                 (key.clone(), fft_value)
-            
+
             })
             .collect()
     }
