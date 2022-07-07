@@ -5,7 +5,7 @@ pub mod dark_photon;
 
 use sphrs::{ComplexSHType, Coordinates as SphrsCoordinates, SHEval};
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::fmt::Debug;
 use num_complex::Complex;
@@ -41,7 +41,7 @@ pub type FrequencyIndex = usize;
 pub type DFTValue = Complex<f32>;
 
 
-pub trait Theory: Clone + Send {
+pub trait Theory: Send {
 
     // const MODES: Modes;
     const NONZERO_ELEMENTS: usize;
