@@ -89,8 +89,34 @@ impl<T> Manager<T> {
     pub fn local_set<I: Copy + Clone>(&self, items: &Vec<I>) -> Vec<I> {
 
         // Gather and return local set of items
-        items
-            .chunks(div_ceil(items.len(), self.size))
+        let mut _local_sets = items
+            .chunks(div_ceil(items.len(), self.size));
+
+        // Warn user if displacements isn't empty
+        // if !self.displacements.is_empty() {
+        //     println!("Balancer Warning: displacements is not empty.");
+        //     println!("You may have not awaited a previous local_set.")
+        // }
+
+        // // Calculate counts
+        // self.counts = _local_sets
+        //     .clone() // clones &[T] not [T]
+        //     .map(|set| set.len())
+        //     .collect::<Vec<usize>>();
+        
+        // // Calculate displacement with counts.
+        // // TODO: assumes fixed size. Implement method for counts not known at compile time.
+        // self.displacements = self.counts
+        //     .iter()
+        //     .scan(0, |acc, &x| {
+        //         let tmp = *acc;
+        //         *acc += x;
+        //         Some(tmp)
+        //     })
+        //     .collect();
+
+        // Return nth local set
+        _local_sets
             .nth(self.rank)
             .unwrap()
             .to_vec()
