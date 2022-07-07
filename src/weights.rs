@@ -521,24 +521,67 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 .collect()
             );
 
-        //         // TODO: noise spectral analysis + bayesian analysis
-        
-        //     }
-            
-        
+        // Parallelize local_set on this rank
+        let data_vector_dashmap: DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> = DashMap::new();
 
-        // Calculate data vector
-        // println!("calculating data vector");
-        // let total_time = SECONDS_PER_DAY as f32 * days as f32;
-        // let frequencies = &[300.0/total_time, 400.0/total_time, 500.0/total_time];
-        //     let local_data_vector_value = local_theory.calculate_data_vector(
-        //         projections,
-        //     );
+        local_set
+            .par_iter()
+            .for_each(|(&coherence_time /* usize */, frequency_bin /* FrequencyBin */)| {
+                
+                let inner_dashmap: DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>> = DashMap::new();
 
-        //     // Insert data vector
-        //     local_data_vector.insert(index, local_data_vector_value);
-        // }
+                // Parallelize over all nonzero elements in the theory
+                projections_complete
+                    .par_iter()
+                    .for_each_with(&inner_dashmap, |inner_map, series|{
+                        
+                        // Unpack element, series
+                        let (element, series) = series.pair();
 
+                        // Calculate number of exact chunks, and the total size of all exact chunks
+                        let exact_chunks: usize = series.len() / coherence_time;
+                        let exact_chunks_size: usize = exact_chunks * coherence_time;
+
+                        // Chunk series
+                        let two_dim_series = series
+                            .slice(s!(0..exact_chunks_size))
+                            .into_shape((coherence_time, exact_chunks))
+                            .expect("This shouldn't fail ever. If anything we should get an early panic from .slice()")
+                            .map(|x| *x as f64);
+
+                        // Do rffts in parallel
+                        let mut rfft_handler = R2cFftHandler::<f64>::new(coherence_time);
+                        let mut rfft_result = ndarray::Array2::<Complex<f64>>::zeros((coherence_time/2 + 1, exact_chunks));
+                        ndfft_r2c(&two_dim_series, &mut rfft_result, &mut rfft_handler, 0);
+
+                        // Get values at relevant frequencies
+                        let approx_sidereal = 5; // TODO:
+                        let start_relevant: usize = *frequency_bin.multiples.start()-approx_sidereal;
+                        let end_relevant: usize = *frequency_bin.multiples.end()+approx_sidereal;
+                        let relevant_range = start_relevant..=end_relevant;
+                        let relevant_values = rfft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range));
+
+                        // Get all relevant triplets
+                        let relevant_triplets: Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)> = relevant_values
+                            .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
+                            .into_iter()
+                            .map(|window| 
+                                (
+                                    window.slice(s![0_usize, ..]).to_owned(),
+                                    window.slice(s![approx_sidereal, ..]).to_owned(),
+                                    window.slice(s![2*approx_sidereal, ..]).to_owned(),
+                                )).collect();
+
+                        // Insert relevant triplets into the inner dashmap
+                        assert!(inner_map
+                            .insert(element.clone(), relevant_triplets).is_none(), "Somehow a duplicate entry was made");
+                    });
+
+                assert!(data_vector_dashmap
+                    .insert(coherence_time, inner_dashmap).is_none(), "Somehow a duplicate entry was made");
+            });
+
+    
         // Unwrap data_vector and theory
         let data_vector = Arc::try_unwrap(data_vector).expect("Somehow an Arc survived");
         let theory = if let Ok(theory) = Arc::try_unwrap(theory) {
