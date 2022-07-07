@@ -408,6 +408,13 @@ async fn calculate_weights_for_chunk(
     
 
 
+async fn calculate_weights_for_chunk(
+    index: Index,
+    local_hashmap_n: &DashMap<StationName, Weight>,
+    local_hashmap_e: &DashMap<StationName, Weight>,
+    local_wn: &mut TimeSeries,
+    local_we: &mut TimeSeries,
+    datasets: &DashMap<StationName, Dataset>,
     // local_valid_seconds: Arc<DashMap<usize /* index */, usize /* count */>>,
 ) {
     datasets
@@ -488,8 +495,8 @@ async fn calculate_weights_for_chunk(
             let clean_station_name: String = dataset.station_name.clone().split("/").collect::<Vec<_>>().get(2).unwrap().to_string();
             local_hashmap_n.insert(clean_station_name.clone(), n_weight);
             local_hashmap_e.insert(clean_station_name, e_weight);
-            local_wn.write().add_assign(&wn_weight);
-            local_we.write().add_assign(&we_weight);
+            local_wn.add_assign(&wn_weight);
+            local_we.add_assign(&we_weight);
         });
 }
 
