@@ -86,7 +86,7 @@ impl<T> Balancer<T> {
 impl<T> Manager<T> { 
 
     /// Calculates local set of items on which to work on.
-    pub fn local_set<I: Copy + Clone>(&self, items: &Vec<I>) -> Vec<I> {
+    pub fn local_set<I: Clone>(&mut self, items: &Vec<I>) -> Vec<I> {
 
         // Gather and return local set of items
         let mut _local_sets = items
