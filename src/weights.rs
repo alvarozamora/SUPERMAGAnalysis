@@ -501,8 +501,6 @@ async fn calculate_weights_for_chunk(
 }
 
 
-/// Given a number `n`, this function finds its largest prime factor
-fn maxprime(n: usize) -> usize {
 
 fn in_longest_subset(chunk: usize, size: usize, starting_value: usize) -> bool {
 
