@@ -58,7 +58,7 @@ lazy_static! {
 
 impl DarkPhoton {
 
-    /// This initilaizes a `DarkPhoton` struct. This struct is to be used during an analysis to produce 
+    /// This initilaizes a `DarkPhoton` struct. This struct is to be used during an analysis to produce
     /// data vectors and signals after implementing `Theory`.
     pub fn initialize(kinetic_mixing: f64) -> Self {
 
