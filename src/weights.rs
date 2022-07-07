@@ -489,12 +489,11 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             Arc::try_unwrap(complete_series).expect("An arc somehow survived")
         };
 
-        // // After rechunking into coherence times, do FFT + noise + bayesian analysis + anything else for every 
-        // {
-        //     const COHERENCE_TIMES: usize = 1000;
-        //     const THRESHOLD: f64 = 0.03;
-        //     let coherence_times: [usize; COHERENCE_TIMES] = find_coherence_times(); // This must be an integer multiple of 1s, hence usize
-        
+        // [ ] Change station criteria so that series with at least one valid point are included
+        // [ ] Noise spectra is weighted by their degree of overlap with the total time series.
+        // Chuck all data prior to 2003
+        // Do coordinate transformation: linearly interpolate between the values in `IGRF_declinations_for_1sec.txt`. The values given are for the start of the 180th day of each year.
+
         //     for coherence_time in coherence_times {
         
         //         // This is the chunked data for this particular coherence time
