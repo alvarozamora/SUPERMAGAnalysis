@@ -23,19 +23,5 @@ fn main() {
     println!("weights len is {}", analysis.weights.we.len());
     println!("data_vector len is {}", analysis.data_vector.len());
 
-    let mut f = std::fs::File::create("secs_with_data").expect("Unable to create file");
-    analysis
-        .valid_secs
-        .iter()
-        .for_each(|x| {
-            
-            // get sec, count
-            let (sec, count) = x.pair();
-
-            let mut entry = vec![];
-            entry.append(&mut sec.to_le_bytes().to_vec());
-            entry.append(&mut count.to_le_bytes().to_vec());
-            f.write_all(&entry).expect("Unable to write data");
-        })
 
 }
