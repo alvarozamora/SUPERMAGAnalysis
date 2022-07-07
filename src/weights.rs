@@ -207,7 +207,6 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         // Wrap theory in an Arc
         let theory = Arc::new(theory);
 
-
         // Calculate local set of tasks
         let set: Range<usize> = 0..loader.semivalid_chunks.len();
         let local_set: Vec<usize> = balancer.local_set(&set.collect());
