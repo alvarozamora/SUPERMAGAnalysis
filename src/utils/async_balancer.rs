@@ -1,3 +1,4 @@
+use mpi::environment::Universe;
 use mpi::topology::{SystemCommunicator, Communicator};
 use mpi::traits::*;
 use tokio::task::spawn;
@@ -13,6 +14,7 @@ pub struct Balancer<T> {
 }
 
 pub struct Manager<T> {
+    pub universe: Universe,
     pub world: SystemCommunicator,
     pub workers: usize,
     pub rank: usize,
@@ -67,6 +69,7 @@ impl<T> Balancer<T> {
 
         Balancer {
             manager: Manager {
+                universe,
                 world,
                 workers,
                 rank,
