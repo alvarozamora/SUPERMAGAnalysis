@@ -211,6 +211,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         let set: Range<usize> = 0..loader.semivalid_chunks.len();
         let local_set: Vec<usize> = balancer.local_set(&set.collect());
 
+        // This loop calculates weights
         for entry in local_set {
 
             // Clone all relevant Arcs
