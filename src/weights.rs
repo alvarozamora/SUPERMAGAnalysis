@@ -512,7 +512,14 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         // Calculate frequency bins from coherence time
         let frequency_bins: Vec<FrequencyBin> = frequencies_from_coherence_times(&coherence_times);
 
-        //         // TODO: FFT
+        // Partition zipped(coherence_times, frequency_bins) over ranks
+        let local_set: Vec<(&usize, FrequencyBin)> = balancer
+            .local_set(
+                &coherence_times
+                .iter()
+                .zip(frequency_bins)
+                .collect()
+            );
 
         //         // TODO: noise spectral analysis + bayesian analysis
         
