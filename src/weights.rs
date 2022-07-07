@@ -55,6 +55,12 @@ type StationName = String;
 type TimeSeries = Array1<f32>;
 type ComplexSeries = Array1<ndrustfft::Complex<f32>>;
 
+#[derive(Clone, PartialEq, Debug)]
+struct FrequencyBin {
+    lower: f64,
+    multiples: RangeInclusive<usize>,
+}
+
 /// This holds the weights (inverse white noise). These weights are a measurement 
 /// intrinsic to the dataset and do not depend on the theory.
 pub struct Weights {
