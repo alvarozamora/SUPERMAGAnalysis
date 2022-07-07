@@ -66,7 +66,7 @@ impl DarkPhoton {
         // let vec_sph_fns = Arc::new(vector_spherical_harmonics(DARK_PHOTON_MODES.clone().into_boxed_slice()));
         // Manual override to remove prefactors
         let mut vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>> = Arc::new(DashMap::new());
-        
+
         vec_sph_fns.insert(
             DARK_PHOTON_NONZERO_ELEMENTS[0].clone(),
             Arc::new(|theta: f32, phi: f32| -> f32 {
