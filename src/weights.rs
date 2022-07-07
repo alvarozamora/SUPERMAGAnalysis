@@ -227,14 +227,14 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
                     // Get chunk index
                     let index: Index = local_loader.semivalid_chunks.entry(entry).into_key();
-                    println!("{:?} working on index {index}", std::thread::current().id());
+                    debug_print!("{:?} working on index {index}", std::thread::current().id());
 
                     // Load datasets for this chunk
                     let datasets: DashMap<StationName, Dataset> = local_loader.load_chunk(index).await.unwrap();
 
                     // e.g. on a year boundary where all stations change
                     if datasets.len() == 0 {
-                        println!("Empty chunk. Proceeding to next chunk");
+                        debug_print!("Empty chunk. Proceeding to next chunk");
                         return ()
                     }
 
@@ -244,28 +244,14 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     let local_wn: RwLock<TimeSeries> = Arc::new(RwLock::new(Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY])));
                     let local_we: RwLock<TimeSeries> = Arc::new(RwLock::new(Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY])));
                     
-                    let secs_per_chunk: usize = datasets.iter().next().unwrap().value().field_1.len();
-                    let mut counter = Array1::<usize>::zeros(secs_per_chunk);
-
-                    calculate_weights_for_chunk();
-
-                    println!("Finished weights");
-                    println!("local_hashmap_n has {} entries", local_hashmap_n.len());
-                    println!("local_hashmap_n has {} entries", local_hashmap_n.len());
-
-
-                    for sec in 0..counter.len() {
-
-                        // For this test, index = day
-                        let day = index;
-                        let secs_since = day * SECONDS_PER_DAY + sec;
-
-                        local_valid_secs.insert(secs_since, counter[sec]);
-                    }
-
+                    debug_print!("Finished weights for index {index}");
+                    debug_print!("local_hashmap_n has {} entries", local_hashmap_n.len());
+                    debug_print!("local_hashmap_n has {} entries", local_hashmap_n.len());
                     // e.g. all stations have nans for all values for this chunk
-                    if local_hashmap_n.len() == 0 { // && cfg!(debug_assertions) {
-                        println!("Invalid chunk. Proceeding to next chunk");
+                        println!("Invalid chunk, as there are less than {} stations with data in this chunk. Proceeding to next chunk", T::MIN_STATIONS);
+                        return ()
+                    } else if local_wn.iter().any(|&x| x == 0.0_f32) {
+                        println!("Invalid chunk, as there is at least one time slot with a normalization weight of 0.0");
                         return ()
                     }
 
