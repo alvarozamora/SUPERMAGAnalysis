@@ -93,6 +93,9 @@ impl DarkPhoton {
                 theta.sin()
             }));
 
+        // Sanity check on our own work
+        assert_eq!(vec_sph_fns.len(), Self::NONZERO_ELEMENTS);
+
         DarkPhoton {
             kinetic_mixing,
             vec_sph_fns,
