@@ -103,8 +103,17 @@ impl<T> Manager<T> {
         self.tasks.push(fut);
     }
 
-    pub async fn buffer_await(&mut self) -> Vec<T>
-    {
+    // /// Adds a set of handles
+    // pub fn tasks(&mut self, mut fut: Vec<Box<dyn Future<Output=T>>>){
+    //     self.done = false;
+    //     self.tasks.append(&mut fut);
+    // }
+
+    /// Buffered awaits all futures on current node without waiting for other nodes. (Use in conjunction with [`barrier`] for blocking across all ranks).
+    /// 
+    /// [`barrier`]: #method.barrier
+    pub async fn buffer_await(&mut self) -> Vec<T> {
+
         // Mark as not done
         self.done = false;
 
@@ -125,10 +134,21 @@ impl<T> Manager<T> {
         result
     }
 
-    /// Waits for all threads to finish (across all ranks! see `barrier` for blocking on one rank).
+    /// Waits for all ranks to reach this point. Pairs well with [`buffer_await`].
+    /// 
+    /// Basic usage:
+    ///
+    /// ```skip
+    /// // Wait for all futures to be awaited on this rank.
+    /// manager.buffer_await();
+    /// // Wait for all ranks to finish awaiting all futures.
+    /// manager.barrier();
+    /// ```
+    /// [`buffer_await`]: #method.buffer_await
     pub fn barrier(&self) {
         self.world.barrier();
     }
+
 }
 
 fn div_ceil(a: usize, b: usize) -> usize
