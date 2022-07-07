@@ -421,10 +421,10 @@ async fn calculate_weights_for_chunk(
             let num_samples: usize = dataset.field_1.fold(0, |acc, &x| if x != SUPERMAG_NAN { acc + 1 } else { acc } );
 
             // If there are no valid entries, abort. Do not clean, and do not modify dashmap
-            // if num_samples == 0 {
-            //     println!("Station {} index {} aborting", &dataset.station_name, index);
-            //     return ()
-            // }
+            if num_samples == 0 {
+                println!("Station {} index {} aborting", &dataset.station_name, index);
+                return ()
+            }
 
             // Clean the fields and find valid entries
             let (valid_entries_1, clean_field_1): (Array1<bool>, TimeSeries) = {
