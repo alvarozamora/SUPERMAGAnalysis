@@ -178,7 +178,7 @@ impl Theory for DarkPhoton {
         }
 
         projection_table
-    }  
+    }
 
 
     fn calculate_data_vector(
