@@ -123,8 +123,7 @@ impl<T> Manager<T> {
     }
 
     /// Adds a handle
-    pub fn task(&mut self, fut: Box<dyn Future<Output=T>>)
-    {
+    pub fn task(&mut self, fut: Box<dyn Future<Output=T>>){
         self.done = false;
         self.tasks.push(fut);
     }
@@ -177,8 +176,7 @@ impl<T> Manager<T> {
 
 }
 
-fn div_ceil(a: usize, b: usize) -> usize
-{
+fn div_ceil(a: usize, b: usize) -> usize {
     // Note to self:
     // If a is zero this will be zero.
     // If b is zero this will panic.
