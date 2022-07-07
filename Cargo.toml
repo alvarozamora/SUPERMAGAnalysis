@@ -13,11 +13,11 @@ rayon = []
 csv = "1.1.6"
 serde = "1.0.137" 
 serde_derive = "1.0.137"
-ndarray = "0.15.4"
+ndarray = { version = "0.15.4", features = ["rayon"] }
 ndarray-npy = "0.8.1"
 anyhow = "1.0.57"
 glob = "0.3.0"
-mpi = { version = "0.6.0", path = "../../rustMPItest/" }
+mpi = { version = "0.6.0", path = "../rsmpi/" }
 dashmap = { version = "5.3.4", features = ["rayon"] }
 tokio = { version = "1.19.2", features = ["full"] }
 futures = "0.3.21"
