@@ -107,6 +107,21 @@ impl DarkPhoton {
 
 impl Theory for DarkPhoton {
 
+    const MIN_STATIONS: usize = 3;
+    const NONZERO_ELEMENTS: usize = 5;
+
+    fn get_nonzero_elements() -> HashSet<NonzeroElement> {
+
+        let mut nonzero_elements = HashSet::new();
+
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[0].clone());
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[1].clone());
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[2].clone());
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[3].clone());
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[4].clone());
+
+        nonzero_elements
+    }
     fn calculate_projections(
         &self,
         weights_n: &DashMap<StationName, f32>,

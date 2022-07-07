@@ -44,7 +44,11 @@ pub type DFTValue = Complex<f32>;
 pub trait Theory: Clone + Send {
 
     // const MODES: Modes;
-    // const NONZERO_ELEMENTS: NonzeroElements;
+    const NONZERO_ELEMENTS: usize;
+    const MIN_STATIONS: usize;
+
+    /// Gets nonzero elements for the theory.
+    fn get_nonzero_elements() -> HashSet<NonzeroElement>;
 
     /// This calculates the pre-FFT data vector X^n_i's for a given theory. It combines data from many
     /// stations into a smaller subset of time series, weighted by their noise.
