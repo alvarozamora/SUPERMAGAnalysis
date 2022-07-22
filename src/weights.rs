@@ -609,11 +609,12 @@ fn frequencies_from_coherence_times(coherence_times: &Vec<usize>) -> Vec<Frequen
             assert!(higher > lower, "frequencies are not in correct order");
 
             // Find start and end multiples of frequency
-            let start = if bin_index == 0 { 0 } else { 1 };
-            let mut end = (higher / lower) as usize;
-            if end as f64 * lower == higher { end -= 1; }
+            let start = if bin_index == 0 { 0 } else { (INV_VEL_SQ / (1.0 + THRESHOLD)) as usize };
+            let next_start = (INV_VEL_SQ / (1.0 + THRESHOLD)) as usize;
+            let mut end = (higher * next_start as f64 / lower) as usize;
+            if end as f64 * lower >= higher * next_start as f64 { end -= 1; }
 
-            assert!(end as f64 * lower < higher, "highest frequency in bin is higher than lowest in next bin");
+            assert!(end as f64 * lower < (higher * next_start as f64), "highest frequency in bin is higher than lowest in next bin");
 
             // Return bin containing all frequencies in [lower, higher), in ascending order
             return FrequencyBin { lower: lower, multiples: start..=end }
