@@ -198,32 +198,139 @@ impl Theory for DarkPhoton {
 
     fn calculate_data_vector(
         &self,
-        projections: DashMap<NonzeroElement, TimeSeries>,
-    ) -> DashMap<NonzeroElement, ComplexSeries> {
+        projections_complete: &DashMap<NonzeroElement, TimeSeries>,
+        local_set: &Vec<(usize, FrequencyBin)>,
+    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> {
 
-        // Initialize fft planner
-        let mut handler = None;
 
-        // For every element in `projections`, do the FFT over the TimeSeries
-        projections
-            .iter()
-            .map(|key_value| {
+        // Parallelize local_set on this rank
+        let data_vector_dashmap: DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> = DashMap::new();
 
-                // Unpack (key, value) pair from projections. value here is the nonzero projections element X
-                let (key, value) = key_value.pair();
+        local_set
+            .par_iter()
+            .for_each(|(coherence_time /* usize */, frequency_bin /* FrequencyBin */)| {
+                
+                let inner_dashmap: DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>> = DashMap::new();
 
-                // Initialize fft_planner if needed. This is done here because the length is not known in advance.
-                if handler.is_none() {
-                    handler = Some(R2cFftHandler::new(value.len()));
-                }
+                // Parallelize over all nonzero elements in the theory
+                projections_complete
+                    .par_iter()
+                    .for_each_with(&inner_dashmap, |inner_map, series| {
+                        
+                        // Unpack element, series
+                        let (element, series) = series.pair();
 
-                // Calculate fft
-                let mut fft_value = ComplexSeries::zeros(value.len()/2 + 1);
-                ndfft_r2c(&value, &mut fft_value, handler.as_mut().unwrap(), 0);
+                        // Calculate number of exact chunks, and the total size of all exact chunks
+                        let exact_chunks: usize = series.len() / coherence_time;
+                        let exact_chunks_size: usize = exact_chunks * coherence_time;
 
-                (key.clone(), fft_value)
+                        // Chunk series
+                        let two_dim_series = series
+                            .slice(s!(0..exact_chunks_size))
+                            .into_shape((*coherence_time, exact_chunks))
+                            .expect("This shouldn't fail ever. If anything we should get an early panic from .slice()")
+                            .map(|x| Complex { re: *x as f64, im: 0.0});
 
-            })
-            .collect()
+                        // Do ffts
+                        let num_fft_elements = *coherence_time;
+                        let mut fft_handler = FftHandler::<f64>::new(*coherence_time);
+                        let mut fft_result = ndarray::Array2::<Complex<f64>>::zeros((num_fft_elements, exact_chunks));
+                        ndfft(&two_dim_series, &mut fft_result, &mut fft_handler, 0);
+
+                        // Get values at relevant frequencies
+                        let approx_sidereal: usize = approximate_sidereal(frequency_bin);
+                        if num_fft_elements < 2*approx_sidereal + 1 {
+                            println!("no triplets exist");
+                            return // Err("no triplets exist")
+                        }
+
+                        // let start_relevant: usize = *frequency_bin.multiples.start()-approx_sidereal;
+                        let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
+                        let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
+                        let relevant_range = start_relevant..=end_relevant;
+                        println!("relevant_range is {start_relevant}..={end_relevant}");
+                        let relevant_values = fft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range));
+
+                        // Get all relevant triplets
+                        let relevant_triplets: Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)> = relevant_values
+                            .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
+                            .into_iter()
+                            .map(|window| 
+                                (
+                                    window.slice(s![0_usize, ..]).to_owned(),
+                                    window.slice(s![approx_sidereal, ..]).to_owned(),
+                                    window.slice(s![2*approx_sidereal, ..]).to_owned(),
+                                )).collect();
+
+                        // Insert relevant triplets into the inner dashmap
+                        assert!(inner_map
+                            .insert(element.clone(), relevant_triplets).is_none(), "Somehow a duplicate entry was made");
+                    });
+
+                assert!(data_vector_dashmap
+                    .insert(*coherence_time, inner_dashmap).is_none(), "Somehow a duplicate entry was made");
+            });
+
+        data_vector_dashmap
+    }
+
+    fn calculate_mean_theory(
+        &self,
+        local_set: &Vec<(usize, FrequencyBin)>,
+        len_data: usize,
+    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> {
+
+        let mu: DashMap<
+            usize /* coherence time */, 
+            DashMap<
+                Index /* chunk for this coherence time */,
+                DashMap<
+                    NonzeroElement,
+                    f64
+                >
+            >
+        > = DashMap::new();
+
+        
+        local_set
+            .par_iter()
+            .for_each(|(coherence_time /* usize */, frequency_bin /* &FrequencyBin */)| {
+
+                // For the processed, cleaned dataset, this is 
+                // the number of chunks for this coherence time
+                let num_chunks = len_data / coherence_time;
+
+                // Calculate the sidereal day frequency
+                let fd = SIDEREAL_DAY_SECONDS.recip();
+
+                // Calculate c_i. Unlike the original implementation, this is done using euler's 
+                // exp(ix) = cos(x) + i sin(x)
+                let c_i = Array1::range(0.0, len_data as f64, 1.0)
+                    .map(|x| Complex { re: *x as f64, im: 0.0 })
+                    .mul(
+                        Complex {
+                            re: 0.0, 
+                            im: 2.0 * PI * approximate_sidereal(frequency_bin) as f64 / *coherence_time as f64 - fd,
+                        }
+                    )
+                    .mapv(Complex::exp);
+
+                // Calculate all the trig fds and pads
+                let cosfd = Array1::range(0.0, len_data as f64, 1.0)
+                    .mul(2.0 * PI * fd)
+                    .mapv(f64::cos);
+                let sinfd = Array1::range(0.0, len_data as f64, 1.0)
+                    .mul(2.0 * PI * fd)
+                    .mapv(f64::sin);
+                let cospad = Array1::range(0.0, len_data as f64, 1.0)
+                    .mul(2.0 * PI * approximate_sidereal(frequency_bin) as f64 / *coherence_time as f64)
+                    .mapv(f64::cos);
+                let sinpad = Array1::range(0.0, len_data as f64, 1.0)
+                    .mul(2.0 * PI * approximate_sidereal(frequency_bin) as f64 / *coherence_time as f64)
+                    .mapv(f64::sin);
+
+
+            });
+        DashMap::new()
     }
 }
