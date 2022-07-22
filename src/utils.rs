@@ -4,6 +4,10 @@ pub mod loader;
 pub mod async_balancer;
 pub mod fft;
 pub mod vec_sph;
+pub mod igrf_decl;
+
+use crate::constants::*;
+use crate::weights::FrequencyBin;
 
 use std::{collections::HashSet, ops::Add};
 
@@ -74,6 +78,56 @@ pub fn maxprime(n: usize) -> usize {
     // Because we are iterating up, this will return the largest prime factor
     return n
 }
+
+pub fn approximate_sidereal(frequency_bin: &FrequencyBin) -> usize {
+
+    // Spacing
+    let df = frequency_bin.lower;
+
+    // Initial guess
+    let multiple = ((SIDEREAL_DAY_SECONDS.recip()) / df) as usize;
+
+    // Check guess and guess + 1
+    let candidate_1 = (
+        ((  multiple     as f64 * df) - SIDEREAL_DAY_SECONDS.recip()).abs(),
+        multiple
+    );
+    let candidate_2 = (
+        (((multiple + 1) as f64 * df) - SIDEREAL_DAY_SECONDS.recip()).abs(),
+        multiple + 1
+    );
+
+    // Return whichever is closest to SIDEREAL_DAY_SECONDS
+    if candidate_1.0 < candidate_2.0 {
+        candidate_1.1
+    } else {
+        candidate_2.1
+    }
+
+}
+
+#[test]
+fn test_approximate_sidereal_candidate1() {
+
+    let frequency_bin = FrequencyBin {
+        lower: (SIDEREAL_DAY_SECONDS - 1.0).recip(),
+        multiples: 1..=10
+    };
+
+    assert_eq!(approximate_sidereal(&frequency_bin), 1)
+}
+
+#[test]
+fn test_approximate_sidereal_candidate2() {
+
+    let frequency_bin = FrequencyBin {
+        lower: (SIDEREAL_DAY_SECONDS + 1.0).recip(),
+        multiples: 1..=10
+    };
+
+    assert_eq!(approximate_sidereal(&frequency_bin), 1)
+}
+
 
 
 #[test]
