@@ -28,8 +28,11 @@ pub const BYTES_PER_FLOAT: usize = 4;
 // pub const SIDEREAL_DAY_SECONDS: usize = 86164/*.0905*/;
 pub const SIDEREAL_DAY_SECONDS: f64 = 86164.0905;
 
+/// Canonical minimum multiple for frequency bin
+pub const I_MIN: usize = (INV_VEL_SQ / (1.0 + THRESHOLD)) as usize;
 
-pub const INV_VEL_SQ: f64 = 1_000_000 as f64;
+/// Inverse velocity squared of dm
+pub const INV_VEL_SQ: f64 = 1e6;
 
 // percent level accuracy of all of the frequencies in a frequency bins
 pub const THRESHOLD: f64 = 0.03;
