@@ -56,9 +56,9 @@ type TimeSeries = Array1<f32>;
 type ComplexSeries = Array1<ndrustfft::Complex<f32>>;
 
 #[derive(Clone, PartialEq, Debug)]
-struct FrequencyBin {
-    lower: f64,
-    multiples: RangeInclusive<usize>,
+pub struct FrequencyBin {
+    pub lower: f64,
+    pub multiples: RangeInclusive<usize>,
 }
 
 /// This holds the weights (inverse white noise). These weights are a measurement 
