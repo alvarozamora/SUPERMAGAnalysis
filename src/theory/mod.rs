@@ -72,6 +72,7 @@ pub trait Theory: Send + Debug {
     fn calculate_mean_theory(
         &self,
         local_set: &Vec<(usize, FrequencyBin)>,
+        len_data: usize,
     ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>)>>>;
 }
 
