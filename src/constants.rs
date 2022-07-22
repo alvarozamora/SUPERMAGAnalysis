@@ -24,5 +24,24 @@ pub const NUM_FIELDS: usize = 3;
 /// Number of bytes per float
 pub const BYTES_PER_FLOAT: usize = 4;
 
+/// Number of seconds in a sidereal day
+// pub const SIDEREAL_DAY_SECONDS: usize = 86164/*.0905*/;
+pub const SIDEREAL_DAY_SECONDS: f64 = 86164.0905;
+
+
+pub const INV_VEL_SQ: f64 = 1_000_000 as f64;
+
+// percent level accuracy of all of the frequencies in a frequency bins
+pub const THRESHOLD: f64 = 0.03;
+
+
+pub mod physical_params {
+
+    // units nano tesla squared
+    pub const RHO: f64 = 6.04e7;
+
+    // Radius of earth in units of seconds
+    pub const R: f64  = 0.0212751;
+}
 
 
