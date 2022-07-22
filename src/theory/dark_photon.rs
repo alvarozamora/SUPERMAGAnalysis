@@ -3,12 +3,16 @@ use std::collections::HashMap;
 use dashmap::DashMap;
 // use goertzel_filter::dft;
 use std::sync::Arc;
-use crate::utils::{
-    loader::Dataset,
-};
+use crate::{utils::{
+    loader::{Dataset, Index},
+    approximate_sidereal,
+}, constants::{SECONDS_PER_DAY, SIDEREAL_DAY_SECONDS}};
 use std::ops::{Mul, Div, Add};
-use ndrustfft::{ndfft_r2c, R2cFftHandler};
-
+use ndrustfft::{ndfft_r2c, R2cFftHandler, FftHandler, ndfft};
+use rayon::prelude::*;
+use ndarray::s;
+use ndrustfft::Complex;
+use std::f64::consts::PI;
 
 type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
 /// Contains all necessary things
@@ -18,6 +22,11 @@ pub struct DarkPhoton {
     vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>>,
 }
 
+impl Debug for DarkPhoton {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(format!("{}", self.kinetic_mixing).as_str())
+    }
+}
 
 lazy_static! {
     static ref DARK_PHOTON_MODES: Vec<Mode> = vec![
