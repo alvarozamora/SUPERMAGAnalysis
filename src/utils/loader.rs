@@ -509,7 +509,7 @@ fn validate_buffer_size(buffer: &[u8], expected_size: usize, year: usize) -> Res
 
 
 /// This is a recursive function that returns the number of days since the first day there was data.
-fn day_since_first(day: usize, year: usize) -> usize {
+pub(crate) fn day_since_first(day: usize, year: usize) -> usize {
 
     match year {
         1998 => day,
