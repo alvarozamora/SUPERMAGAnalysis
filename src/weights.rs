@@ -503,9 +503,6 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         let total_time = total_secs as f64;
         let coherence_times: Vec<usize> = {
 
-            // percent level accuracy of all of the frequencies in a frequency bins
-            const THRESHOLD: f64 = 0.03;
-
             coherence_times(total_time, THRESHOLD)
         };
 
