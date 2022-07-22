@@ -590,6 +590,11 @@ fn coherence_times(total_time: f64, threshold: f64) -> Vec<usize> {
 /// Given a complete set of `coherence_times`, sorted in descending order, calculates
 /// the corresponding frequency bins
 fn frequencies_from_coherence_times(coherence_times: &Vec<usize>) -> Vec<FrequencyBin> {
+
+    assert!(
+        coherence_times.iter().max().unwrap() > &I_MIN,
+        "In order to have frequency multiple i_min be O(v_dm^-2), need max coherence time to be at least v_dm^-2 seconds"
+    );
     
     // Calculate base frequencies, i.e. reciprocal of coherence times
     // Since coherence_times is in descending order, these will be in ascending order
@@ -609,12 +614,11 @@ fn frequencies_from_coherence_times(coherence_times: &Vec<usize>) -> Vec<Frequen
             assert!(higher > lower, "frequencies are not in correct order");
 
             // Find start and end multiples of frequency
-            let start = if bin_index == 0 { 0 } else { (INV_VEL_SQ / (1.0 + THRESHOLD)) as usize };
-            let next_start = (INV_VEL_SQ / (1.0 + THRESHOLD)) as usize;
-            let mut end = (higher * next_start as f64 / lower) as usize;
-            if end as f64 * lower >= higher * next_start as f64 { end -= 1; }
+            let start = if bin_index == 0 { 0 } else { I_MIN };
+            let mut end = (higher * I_MIN as f64 / lower) as usize;
+            if end as f64 * lower >= higher * I_MIN as f64 { end -= 1; }
 
-            assert!(end as f64 * lower < (higher * next_start as f64), "highest frequency in bin is higher than lowest in next bin");
+            assert!(end as f64 * lower < (higher * I_MIN as f64), "highest frequency in bin is higher than lowest in next bin");
 
             // Return bin containing all frequencies in [lower, higher), in ascending order
             return FrequencyBin { lower: lower, multiples: start..=end }
@@ -630,7 +634,7 @@ fn frequencies_from_coherence_times(coherence_times: &Vec<usize>) -> Vec<Frequen
 
         FrequencyBin {
             lower: highest_frequency_bin_start,
-            multiples: 1..=highest_frequency,
+            multiples: I_MIN..=highest_frequency,
         }
     });
 
@@ -642,7 +646,7 @@ fn frequencies_from_coherence_times(coherence_times: &Vec<usize>) -> Vec<Frequen
 fn test_frequencies_from_coherence_times() {
 
     // The function that generates these returns them in descending order. lets do the same
-    let coherence_times = vec![100, 4];
+    let coherence_times = vec![10_000_000, 250_000];
 
     // Calculate frequency bins
     let frequency_bins = frequencies_from_coherence_times(&coherence_times);
@@ -652,16 +656,16 @@ fn test_frequencies_from_coherence_times() {
         .zip(
         vec![
             FrequencyBin {
-                lower: 1.0 / 100.0,
-                multiples: 0..=24,
+                lower: 1.0 / 10_000_000.0,
+                multiples: 0..=(I_MIN as f64 * 10_000_000.0 / 250_000.0) as usize - 1 /* -1 because 1e-6 neatly divides 1/250_000 */,
             },
             FrequencyBin {
-                lower: 1.0 / 4.0,
-                multiples: 1..=3,
+                lower: 1.0 / 250_000.0,
+                multiples: I_MIN..=249_999,
             }
         ].iter()
     ).for_each(|(bin_a, bin_b)| {
-        assert_eq!(*bin_a, *bin_b, "frequency bins are not the same");
+        assert_eq!(bin_a, bin_b, "frequency bins are not the same");
     })
         
 }
