@@ -763,7 +763,8 @@ async fn calculate_weights_for_chunk(
 }
 
 
-
+/// `starting_value` and `size` specify a range of integers.
+/// This function checks if `chunk` is in that range.
 fn in_longest_subset(chunk: usize, size: usize, starting_value: usize) -> bool {
 
     (chunk >= starting_value)
