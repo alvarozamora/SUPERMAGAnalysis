@@ -6,6 +6,8 @@ use std::io::Write;
 
 fn main() {
 
+    env_logger::init();
+    
     // Define stationarity time, Coherence time 
     const STATIONARITY_TIME: Stationarity = Stationarity::Daily(1);
 
