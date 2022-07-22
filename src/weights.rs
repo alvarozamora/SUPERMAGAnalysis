@@ -18,6 +18,8 @@ use rayon::iter::{ParallelIterator, IntoParallelIterator, IntoParallelRefIterato
 use mpi::point_to_point::{Source, Destination};
 use ndrustfft::{ndfft_r2c, Complex, R2cFftHandler};
 
+use log::*;
+
 macro_rules! debug {
     ($($e:expr),+) => {
         {
