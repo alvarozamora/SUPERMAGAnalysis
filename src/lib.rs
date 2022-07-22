@@ -1,5 +1,3 @@
-#![feature(arc_unwrap_or_clone)]
-
 #[macro_use]
 extern crate lazy_static;
 
