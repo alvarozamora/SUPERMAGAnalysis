@@ -16,6 +16,7 @@ use crate::{
         coordinates::construct_coordinate_map,
         loader::Dataset,
     },
+    weights::FrequencyBin,
 };
 
 const NULL: f32 = 0.0;
@@ -41,7 +42,7 @@ pub type FrequencyIndex = usize;
 pub type DFTValue = Complex<f32>;
 
 
-pub trait Theory: Send {
+pub trait Theory: Send + Debug {
 
     // const MODES: Modes;
     const NONZERO_ELEMENTS: usize;
@@ -61,14 +62,17 @@ pub trait Theory: Send {
         chunk_dataset: &DashMap<StationName, Dataset>,
     ) -> DashMap<NonzeroElement, TimeSeries>;
 
-    /// This calculates the theoretical signal expected for the Earth's magnetic field
-    /// for a given set of coordinates.
+    /// This finds the triplets 
     fn calculate_data_vector(
         &self,
-        projections: DashMap<NonzeroElement, TimeSeries>,
-        // frequencies: &[Frequency],
-        // total_time: f32,
-    ) -> DashMap<NonzeroElement, ComplexSeries>;
+        projections_complete: &DashMap<NonzeroElement, TimeSeries>,
+        local_set: &Vec<(usize, FrequencyBin)>
+    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>)>>>;
+
+    fn calculate_mean_theory(
+        &self,
+        local_set: &Vec<(usize, FrequencyBin)>,
+    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>)>>>;
 }
 
 
