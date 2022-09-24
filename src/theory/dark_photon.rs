@@ -343,3 +343,27 @@ impl Theory for DarkPhoton {
         DashMap::new()
     }
 }
+
+/// This calculates the fft of a tophat function starting at t=0 and going to t=T, 
+/// the length of the longest contiguous subset of the dataset Xi(t). 
+/// 
+/// To reiterate/clarify, this function assumes there are no gaps in data availability.
+/// 
+/// At k = 0, this results in 0/0, requiring the use of the L'Hospital rule. As such,
+/// this case is dealt separately.
+fn one_tilde(
+    coherence_time: f64,
+    chunk_index: usize,
+    number_of_chunks: usize,
+    k: f64,
+) -> Complex<f64> {
+    match k {
+        
+        // Deal with L'Hospital limit separately
+        0.0 => Complex::new(coherence_time, 0.0),
+
+        // Otherwise, evaluate function
+        _ => (Complex::new(0.0, (1.0 - ((chunk_index + number_of_chunks) as f64 * coherence_time)/number_of_chunks as f64) * k).exp())*(-1.0 + Complex::new(0.0, coherence_time * k).exp())
+                / (-1.0 + Complex::new(0.0, k).exp())
+    }
+}
