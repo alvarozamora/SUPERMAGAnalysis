@@ -5,14 +5,15 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use crate::{utils::{
     loader::{Dataset, Index},
-    approximate_sidereal,
-}, constants::{SECONDS_PER_DAY, SIDEREAL_DAY_SECONDS}};
+    approximate_sidereal, coordinates::Coordinates,
+}, constants::{SECONDS_PER_DAY, SIDEREAL_DAY_SECONDS}, weights::Weights};
 use std::ops::{Mul, Div, Add};
 use ndrustfft::{ndfft_r2c, R2cFftHandler, FftHandler, ndfft};
 use rayon::prelude::*;
 use ndarray::s;
 use ndrustfft::Complex;
 use std::f64::consts::PI;
+use std::f32::consts::PI as SINGLE_PI;
 
 type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
 /// Contains all necessary things
