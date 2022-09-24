@@ -344,6 +344,94 @@ impl Theory for DarkPhoton {
     }
 }
 
+/// This function takes in the weights w_i along with the station coordinates and calculates H_i(t)
+fn calculate_auxilary_values(
+    weights_n: &DashMap<StationName, f32>,
+    weights_e: &DashMap<StationName, f32>,
+    weights_wn: &TimeSeries,
+    weights_we: &TimeSeries,
+    // chunk_dataset: &DashMap<StationName, Dataset>,
+) -> DashMap<usize, TimeSeries> {
+
+    // Initialize auxilary_value table
+    let auxilary_value_series_plural = DashMap::new();
+
+    // Gather coordinate table
+    let coordinates = construct_coordinate_map();
+
+    // Get size of series
+    let size = weights_wn.len();
+
+    for i in 1..=7 {
+
+        // Here we iterate thrhough weights_n and not chunk_dataset because
+        // stations in weight_n are a subset (filtered) of those in chunk_dataset.
+        // Could perhaps save memory by dropping coressponding invalid datasets in chunk_dataset.
+        let auxilary_value_series_unnormalized: TimeSeries = weights_n
+            .iter()
+            .map(|key_value| {
+
+                // Unpack (key, value) pair
+                // Here, key is StationName and value = dataset
+                let station_name = key_value.key();
+
+                // Get station coordinate
+                let sc: &Coordinates = coordinates
+                    .get(station_name)
+                    .expect("station coordinates should exist");
+
+                // Get product of relevant component of vector spherical harmonics and of the magnetic field.
+                let auxilary_value = match i {
+                    
+                    // H1 summand = wn * cos(phi)^2
+                    1 => (sc.longitude.cos().powi(2) as f32).mul(*weights_n.get(station_name).unwrap()),
+
+                    // H2 summand = wn * sin(phi) * cos(phi)
+                    2 => ((sc.longitude.sin() * sc.longitude.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
+
+                    // H3 summand = we * cos(polar)^2
+                    3 => (sc.polar.cos().powi(2) as f32).mul(*weights_e.get(station_name).unwrap()),
+
+                    // H4 summand = we * cos(phi)^2 * cos(polar)^2
+                    4 => ((sc.longitude.cos().powi(2) * sc.polar.cos().powi(2)) as f32).mul(*weights_n.get(station_name).unwrap()),
+
+                    // H5 summand = we * sin(phi) * cos(phi) * cos(polar)^2
+                    5 => ((sc.longitude.sin() * sc.longitude.cos() * sc.polar.cos().powi(2)) as f32)
+                        .mul(*weights_n.get(station_name).unwrap()),
+
+                    // H6 summand = we * cos(phi) * sin(polar) * cos(polar)
+                    6 => ((sc.longitude.cos() * sc.polar.sin() * sc.polar.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
+
+                    // H7 summand = we * sin(phi) * sin(polar) * cos(polar)
+                    7 => ((sc.longitude.sin() * sc.polar.sin() * sc.polar.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
+                    
+                    _ => unreachable!("hardcoded to iterate from 1 to 7"),
+                };
+
+                auxilary_value
+            })
+            .fold(TimeSeries::default(size), |acc, series| acc.add(series));
+
+            // Divide by correct Wi
+            let auxilary_value_series_normalized = match i {
+                1 => auxilary_value_series_unnormalized.div(weights_wn),
+                2 => auxilary_value_series_unnormalized.div(weights_wn),
+                3 => auxilary_value_series_unnormalized.div(weights_we),
+                4 => auxilary_value_series_unnormalized.div(weights_we),
+                5 => auxilary_value_series_unnormalized.div(weights_we),
+                6 => auxilary_value_series_unnormalized.div(weights_we),
+                7 => auxilary_value_series_unnormalized.div(weights_we),
+                _ => unreachable!("hardcoded to iterate from 1 to 7")
+            }; 
+
+        // Insert combined time series for this nonzero element for this chunk, ensuring no duplicate entry
+        assert!(auxilary_value_series_plural.insert(i, auxilary_value_series_normalized).is_none(), "Somehow made a duplicate entry");
+    }
+
+    auxilary_value_series_plural
+}
+
+
 /// This calculates the fft of a tophat function starting at t=0 and going to t=T, 
 /// the length of the longest contiguous subset of the dataset Xi(t). 
 /// 
