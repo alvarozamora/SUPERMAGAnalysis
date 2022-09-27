@@ -11,6 +11,7 @@ use std::ops::{Mul, Div, Add};
 use ndrustfft::{ndfft_r2c, R2cFftHandler, FftHandler, ndfft};
 use rayon::prelude::*;
 use ndarray::s;
+use num_traits::ToPrimitive;
 use ndrustfft::Complex;
 use std::f64::consts::PI;
 use std::f32::consts::PI as SINGLE_PI;
@@ -120,6 +121,8 @@ impl Theory for DarkPhoton {
     const MIN_STATIONS: usize = 3;
     const NONZERO_ELEMENTS: usize = 5;
 
+    type AuxilaryValue = [TimeSeries; 7];
+
     fn get_nonzero_elements() -> HashSet<NonzeroElement> {
 
         let mut nonzero_elements = HashSet::new();
@@ -205,13 +208,11 @@ impl Theory for DarkPhoton {
         projection_table
     }
 
-
     fn calculate_data_vector(
         &self,
         projections_complete: &DashMap<NonzeroElement, TimeSeries>,
         local_set: &Vec<(usize, FrequencyBin)>,
     ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> {
-
 
         // Parallelize local_set on this rank
         let data_vector_dashmap: DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> = DashMap::new();
@@ -220,6 +221,7 @@ impl Theory for DarkPhoton {
             .par_iter()
             .for_each(|(coherence_time /* usize */, frequency_bin /* FrequencyBin */)| {
                 
+                // This holds the result for a single coherence time
                 let inner_dashmap: DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>> = DashMap::new();
 
                 // Parallelize over all nonzero elements in the theory
@@ -284,24 +286,33 @@ impl Theory for DarkPhoton {
         data_vector_dashmap
     }
 
+    /// NOTE: this implementation assumes that the time series is fully contiguous (with no null values).
+    /// As such, it will produce incorrect results if used with a dataset that contains null values.
+    /// 
+    /// 
     fn calculate_mean_theory(
         &self,
         local_set: &Vec<(usize, FrequencyBin)>,
         len_data: usize,
-    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> {
+        coherence_times: usize,
+        auxilary_values: Self::AuxilaryValue,
+    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f32>>, Array1<Complex<f32>>, Array1<Complex<f32>>)>>> {
 
-        let mu: DashMap<
-            usize /* coherence time */, 
-            DashMap<
-                Index /* chunk for this coherence time */,
-                DashMap<
-                    NonzeroElement,
-                    f64
-                >
-            >
-        > = DashMap::new();
+        // let mus: DashMap<
+        //     usize /* coherence time */, 
+        //     DashMap<
+        //         Index /* chunk for this coherence time */,
+        //         DashMap<
+        //             NonzeroElement, /* the nonzero element */
+        //             Array1<Complex<f64>> /* values at all relevant frequencies */
+        //         >
+        //     >
+        // > = DashMap::new();
+        let mus = Mus::default();
 
-        
+        // Calculate the sidereal day frequency
+        const FD: f64 = 1.0 / SIDEREAL_DAY_SECONDS;
+
         local_set
             .par_iter()
             .for_each(|(coherence_time /* usize */, frequency_bin /* &FrequencyBin */)| {
@@ -310,40 +321,269 @@ impl Theory for DarkPhoton {
                 // the number of chunks for this coherence time
                 let num_chunks = len_data / coherence_time;
 
-                // Calculate the sidereal day frequency
-                let fd = SIDEREAL_DAY_SECONDS.recip();
-
-                // Calculate c_i. Unlike the original implementation, this is done using euler's 
+                // Calculate cos + isin. Unlike the original implementation, this is done using euler's 
                 // exp(ix) = cos(x) + i sin(x)
-                let c_i = Array1::range(0.0, len_data as f64, 1.0)
-                    .map(|x| Complex { re: *x as f64, im: 0.0 })
+                //
+                // Note: when you encounter a chunk that has total time < coherence time, the s![start..end] below will truncate it.
+                let cis = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    .map(|x| Complex { re: *x, im: 0.0 })
                     .mul(
                         Complex {
                             re: 0.0, 
-                            im: 2.0 * PI * approximate_sidereal(frequency_bin) as f64 / *coherence_time as f64 - fd,
+                            im: 2.0 * SINGLE_PI * ((approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed") - FD as f32),
                         }
                     )
                     .mapv(Complex::exp);
 
                 // Calculate all the trig fds and pads
-                let cosfd = Array1::range(0.0, len_data as f64, 1.0)
-                    .mul(2.0 * PI * fd)
-                    .mapv(f64::cos);
-                let sinfd = Array1::range(0.0, len_data as f64, 1.0)
-                    .mul(2.0 * PI * fd)
-                    .mapv(f64::sin);
-                let cospad = Array1::range(0.0, len_data as f64, 1.0)
-                    .mul(2.0 * PI * approximate_sidereal(frequency_bin) as f64 / *coherence_time as f64)
-                    .mapv(f64::cos);
-                let sinpad = Array1::range(0.0, len_data as f64, 1.0)
-                    .mul(2.0 * PI * approximate_sidereal(frequency_bin) as f64 / *coherence_time as f64)
-                    .mapv(f64::sin);
+                let cosfd = Array1::range(0.0, len_data as f32, 1.0)
+                    .mul(2.0 * SINGLE_PI * FD as f32)
+                    .mapv(f32::cos);
+                let sinfd = Array1::range(0.0, len_data as f32, 1.0)
+                    .mul(2.0 * SINGLE_PI * FD as f32)
+                    .mapv(f32::sin);
+                let cospad = Array1::range(0.0, len_data as f32, 1.0)
+                    .mul(2.0 * SINGLE_PI * approximate_sidereal(frequency_bin) as f32 * frequency_bin.lower as f32)
+                    .mapv(f32::cos);
+                let sinpad = Array1::range(0.0, len_data as f32, 1.0)
+                    .mul(2.0 * SINGLE_PI * approximate_sidereal(frequency_bin) as f32 * frequency_bin.lower as f32)
+                    .mapv(f32::sin);
 
+                
+                // TODO: refactor elsewhere to be user input or part of some fit
+                const RHO: f32 = 6.04e7;
+                const R: f32 = 0.0212751;
 
+                // TODO
+                let signal = &auxilary_values;
+
+                for chunk in 0..num_chunks {
+
+                    let inner_chunk_map = DashMap::new();
+
+                    // Begining and end index for this chunk in the total series
+                    let start: usize  = chunk * coherence_time;
+                    let end: usize = ((chunk + 1) * coherence_time).min(len_data);
+
+                    // Get references to auxilary values for this chunk for better readability
+                    let h1 = signal[0].slice(s![start..end]);
+                    let h2 = signal[1].slice(s![start..end]);
+                    let h3 = signal[2].slice(s![start..end]);
+                    let h4 = signal[3].slice(s![start..end]);
+                    let h5 = signal[4].slice(s![start..end]);
+                    let h6 = signal[5].slice(s![start..end]);
+                    let h7 = signal[6].slice(s![start..end]);
+
+                    // muxfd0 is FT of (1 - H1 + iH2) at f=fdhat-fd
+                    let muxfd0 = cis.slice(s![start..end])
+                        .mul(Complex::<f32>::new(1.0, 0.0)
+                            .add(h1
+                                .iter()
+                                .zip(h2)
+                                .map(|(&h1_, &h2_)| Complex::new(-h1_, h2_))
+                                .collect::<Array1<_>>()))
+                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .sum();
+                    inner_chunk_map
+                        .insert(
+                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[0]),
+                            muxfd0
+                        );
+
+                    // muxfd1 is FT of ci * (H2 + iH1) at f=fdhat-fd
+                    let muxfd1 = cis.slice(s![start..end])
+                        .mul(h1
+                            .iter()
+                            .zip(h2)
+                            .map(|(&h1_, &h2_)| Complex::new(h2_, h1_))
+                            .collect::<Array1<_>>())
+                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .sum();
+                    inner_chunk_map
+                        .insert(
+                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[1]),
+                            muxfd1
+                        );
+
+                    // muxfd2 is FT of ci * (H4 - iH5) at f=fdhat-fd
+                    let muxfd2 = cis.slice(s![start..end])
+                        .mul(signal[3]
+                            .slice(s![start..end])
+                            .iter()
+                            .zip(signal[4].slice(s![start..end]))
+                            .map(|(&h4, &h5)| Complex::new(h4, -h5))
+                            .collect::<Array1<_>>())
+                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .sum();
+                    inner_chunk_map
+                        .insert(
+                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[2]),
+                            muxfd2
+                        );
+
+                    // muxfd3 is FT of ci * (H5 + i(H3-H4)) at f=fdhat-fd
+                    let muxfd3 = cis.slice(s![start..end])
+                        .mul(signal[2]
+                            .slice(s![start..end])
+                            .iter()
+                            .zip(signal[3].slice(s![start..end]))
+                            .zip(signal[4].slice(s![start..end]))
+                            .map(|((&h3, &h4), &h5)| Complex::new(-h5, h3-h4))
+                            .collect::<Array1<_>>())
+                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .sum();
+                    inner_chunk_map
+                        .insert(
+                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[3]),
+                            muxfd3
+                        );
+
+                    // muxfd4 is FT of ci * (H6 - iH7) at f=fdhat-fd
+                    let muxfd4 = cis.slice(s![start..end])
+                        .mul(signal[5]
+                            .slice(s![start..end])
+                            .iter()
+                            .zip(signal[6].slice(s![start..end]))
+                            .map(|(&h6, &h7)| Complex::new(h6, -h7))
+                            .collect::<Array1<_>>())
+                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .sum();
+                    inner_chunk_map
+                        .insert(
+                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[4]),
+                            muxfd4
+                        );
+
+                    // start of f=0 components
+
+                    // mux0_0 is FT of ci * (1 - H1 + iH2) at f=fdhat-fd
+                    let mux0_0 = cis.slice(s![start..end])
+                        .mul(Complex::<f32>::new(1.0, 0.0)
+                            .add(signal[0]
+                                .slice(s![start..end])
+                                .iter()
+                                .zip(signal[1].slice(s![start..end]))
+                                .map(|(&h1, &h2)| Complex::new(-h1, h2))
+                                .collect::<Array1<_>>()))
+                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .sum()
+                        .re + ;
+                    inner_chunk_map
+                        .insert(
+                            (0, DARK_PHOTON_NONZERO_ELEMENTS[0]),
+                            mux0_0
+                        );
+                    // mux0_1 is FT of ci * (H2 + iH1) at f=fdhat-fd
+                    inner_chunk_map
+                        .insert(
+                            (0, DARK_PHOTON_NONZERO_ELEMENTS[1]),
+                            ci.slice(s![start..end])
+                                .mul(signal[0]
+                                    .slice(s![start..end])
+                                    .iter()
+                                    .zip(signal[1].slice(s![start..end]))
+                                    .map(|(&h1, &h2)| Complex::new(h2, h1))
+                                    .collect::<Array1<_>>())
+                                .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                                .sum()
+                        );
+                    // mux0_2 is FT of ci * (H4 - iH5) at f=fdhat-fd
+                    inner_chunk_map
+                        .insert(
+                            (0, DARK_PHOTON_NONZERO_ELEMENTS[2]),
+                            ci.slice(s![start..end])
+                                .mul(signal[3]
+                                    .slice(s![start..end])
+                                    .iter()
+                                    .zip(signal[4].slice(s![start..end]))
+                                    .map(|(&h4, &h5)| Complex::new(h4, -h5))
+                                    .collect::<Array1<_>>())
+                                .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                                .sum()
+                        );
+                    // mux0_3 is FT of ci * (H5 + i(H3-H4)) at f=fdhat-fd
+                    inner_chunk_map
+                        .insert(
+                            (0, DARK_PHOTON_NONZERO_ELEMENTS[3]),
+                            ci.slice(s![start..end])
+                                .mul(signal[2]
+                                    .slice(s![start..end])
+                                    .iter()
+                                    .zip(signal[3].slice(s![start..end]))
+                                    .zip(signal[4].slice(s![start..end]))
+                                    .map(|((&h3, &h4), &h5)| Complex::new(-h5, h3-h4))
+                                    .collect::<Array1<_>>())
+                                .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                                .sum()
+                        );
+                    // mux0_4 is FT of ci * (H6 - iH7) at f=fdhat-fd
+                    inner_chunk_map
+                        .insert(
+                            (0, DARK_PHOTON_NONZERO_ELEMENTS[4]),
+                            ci.slice(s![start..end])
+                                .mul(signal[5]
+                                    .slice(s![start..end])
+                                    .iter()
+                                    .zip(signal[6].slice(s![start..end]))
+                                    .map(|(&h6, &h7)| Complex::new(h6, -h7))
+                                    .collect::<Array1<_>>())
+                                .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                                .sum()
+                        );
+                    
+                    // mux0[n][k, 0] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end]) - np.sum(cosfd[start:end] * signal[0, start:end]) + np.sum(sinfd[start:end] * signal[1, start:end]))
+                    // mux0[n][k, 1] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[1, start:end]) + np.sum(sinfd[start:end] * signal[0, start:end]))
+                    // mux0[n][k, 2] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[3, start:end]) - np.sum(sinfd[start:end] * signal[4, start:end]))
+                    // mux0[n][k, 3] = math.pi * R * math.sqrt(rho / 2) * (-np.sum(cosfd[start:end] * signal[4, start:end]) + np.sum(sinfd[start:end] * (signal[2, start:end] - signal[3, start:end])))
+                    // mux0[n][k, 4] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[5, start:end]) - np.sum(sinfd[start:end] * signal[6, start:end]))
+            
+                    // muyfd[n][k, 0] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (signal[1, start:end] - 1j * (1 - signal[0, start:end])))
+                    // muyfd[n][k, 1] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (signal[0, start:end] - 1j * signal[1, start:end]))
+                    // muyfd[n][k, 2] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (-signal[4, start:end] - 1j * signal[3, start:end]))
+                    // muyfd[n][k, 3] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (signal[2, start:end] - signal[3, start:end] + 1j * signal[4, start:end]))
+                    // muyfd[n][k, 4] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (-signal[6, start:end] - 1j * signal[5, start:end]))
+            
+                    // muy0[n][k, 0] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[1, start:end]) - np.sum(sinfd[start:end]) + np.sum(sinfd[start:end] * signal[0, start:end]))
+                    // muy0[n][k, 1] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[0, start:end]) - np.sum(sinfd[start:end] * signal[1, start:end]))
+                    // muy0[n][k, 2] = math.pi * R * math.sqrt(rho / 2) * (-np.sum(cosfd[start:end] * signal[4, start:end]) - np.sum(sinfd[start:end] * signal[3, start:end]))
+                    // muy0[n][k, 3] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * (signal[2, start:end] - signal[3, start:end])) + np.sum(sinfd[start:end] * signal[4, start:end]))
+                    // muy0[n][k, 4] = math.pi * R * math.sqrt(rho / 2) * (-np.sum(cosfd[start:end] * signal[6, start:end]) - np.sum(sinfd[start:end] * signal[5, start:end]))
+            
+                    // muzfd[n][k, 2] = math.pi * R * math.sqrt(rho / 2) * np.sum((cospad[start:end] + 1j * sinpad[start:end]) * signal[5, start:end])
+                    // muzfd[n][k, 3] = -math.pi * R * math.sqrt(rho / 2) * np.sum((cospad[start:end] + 1j * sinpad[start:end]) * signal[6, start:end])
+                    // muzfd[n][k, 4] = math.pi * R * math.sqrt(rho / 2) * np.sum((cospad[start:end] + 1j * sinpad[start:end]) * (1 - signal[2, start:end]))
+            
+                    // muz0[n][k, 2] = math.pi * R * math.sqrt(rho / 2) * np.sum(signal[5, start:end])
+                    // muz0[n][k, 3] = -math.pi * R * math.sqrt(rho / 2) * np.sum(signal[6, start:end])
+                    // muz0[n][k, 4] = math.pi * R * math.sqrt(rho / 2) * (end - start - np.count_nonzero(np.logical_and(nans >= start, nans < end)) - np.sum(signal[2, start:end]))
+                }
             });
+
         DashMap::new()
     }
 }
+
+#[derive(Default)]
+pub struct Mus {
+    xfd: Mu,
+    x0: Mu,
+    yfd: Mu,
+    y0: Mu,
+    zfd: Mu,
+    z0: Mu,
+}
+
+pub type Mu = DashMap<
+    usize /* coherence time */, 
+    DashMap<
+        Index /* chunk for this coherence time */,
+        DashMap<
+            NonzeroElement, /* the nonzero element */
+            Array1<Complex<f64>> /* values at all relevant frequencies */
+        >
+    >
+>;
+
 
 /// This function takes in the weights w_i along with the station coordinates and calculates H_i(t)
 fn calculate_auxilary_values(
