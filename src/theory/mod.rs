@@ -48,6 +48,9 @@ pub trait Theory: Send + Debug {
     const NONZERO_ELEMENTS: usize;
     const MIN_STATIONS: usize;
 
+    // Any auxilary values
+    type AuxilaryValue;
+
     /// Gets nonzero elements for the theory.
     fn get_nonzero_elements() -> HashSet<NonzeroElement>;
 
@@ -62,18 +65,23 @@ pub trait Theory: Send + Debug {
         chunk_dataset: &DashMap<StationName, Dataset>,
     ) -> DashMap<NonzeroElement, TimeSeries>;
 
-    /// This finds the triplets 
+    /// Finds X(k) for the relevant frequencies for a given coherence time.
+    /// For the dark photon, those are given by triplets, which are presently hard coded.
+    /// TODO: Change the return type to be an associated type for the theory.
     fn calculate_data_vector(
         &self,
         projections_complete: &DashMap<NonzeroElement, TimeSeries>,
         local_set: &Vec<(usize, FrequencyBin)>
     ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>)>>>;
 
+    /// Calculate mu for the theory
     fn calculate_mean_theory(
         &self,
         local_set: &Vec<(usize, FrequencyBin)>,
         len_data: usize,
-    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>)>>>;
+        coherence_times: usize,
+        auxilary_values: Self::AuxilaryValue,
+    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<ndrustfft::Complex<f32>>, Array1<ndrustfft::Complex<f32>>, Array1<ndrustfft::Complex<f32>>)>>>;
 }
 
 
