@@ -106,6 +106,36 @@ pub fn approximate_sidereal(frequency_bin: &FrequencyBin) -> usize {
 
 }
 
+pub fn approximate_frequency(
+    frequency_bin: &FrequencyBin,
+    target_frequency: f64
+) -> usize {
+
+    // Spacing
+    let df = frequency_bin.lower;
+
+    // Initial guess
+    let multiple = (target_frequency / df) as usize;
+
+    // Check guess and guess + 1
+    let candidate_1 = (
+        ((  multiple     as f64 * df) - target_frequency).abs(),
+        multiple
+    );
+    let candidate_2 = (
+        (((multiple + 1) as f64 * df) - target_frequency).abs(),
+        multiple + 1
+    );
+
+    // Return whichever is closest to SIDEREAL_DAY_SECONDS
+    if candidate_1.0 < candidate_2.0 {
+        candidate_1.1
+    } else {
+        candidate_2.1
+    }
+
+}
+
 #[test]
 fn test_approximate_sidereal_candidate1() {
 
