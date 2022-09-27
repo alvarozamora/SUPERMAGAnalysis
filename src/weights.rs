@@ -241,8 +241,8 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     }
 
                     // Local hashmaps and time series
-                    let local_hashmap_n: DashMap<StationName, Weight> =DashMap::with_capacity(datasets.len());
-                    let local_hashmap_e: DashMap<StationName, Weight> =DashMap::with_capacity(datasets.len());
+                    let local_hashmap_n: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
+                    let local_hashmap_e: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
                     let mut local_wn: TimeSeries = Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY]);
                     let mut local_we: TimeSeries = Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY]);
                     
@@ -367,7 +367,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             all_nonzero_chunks.sort();
 
             // We first initialize a dashmap with T::NONZERO_ELEMENTS number of zeroed series
-            //  to which we will add nonzero chunks
+            // to which we will add nonzero chunks
             let nonzero_elements: HashSet<NonzeroElement> = T::get_nonzero_elements();
 
             // Iterate through sorted chunk index array and send/receive chunks
@@ -503,10 +503,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         // so the length of one of the time series is the total amount of time we are analyzing.
         let total_secs: usize = projections_complete.iter().next().unwrap().value().len();
         let total_time = total_secs as f64;
-        let coherence_times: Vec<usize> = {
-
-            coherence_times(total_time, THRESHOLD)
-        };
+        let coherence_times: Vec<usize> = coherence_times(total_time, THRESHOLD);
 
         // Calculate frequency bins from coherence time
         let frequency_bins: Vec<FrequencyBin> = frequencies_from_coherence_times(&coherence_times);
@@ -521,8 +518,13 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 .collect()
             );
 
-        // Calculate data vector for this local set
-        let data_vector_dashmap = theory.calculate_data_vector(&projections_complete, &local_set);
+        // Calculate data vector for this local set.
+        let data_vector_dashmap = theory
+            .calculate_data_vector(&projections_complete, &local_set);
+
+        // Calculate the mean theory
+        let mean_theory = theory
+            .calculate_mean_theory(&local_set, total_secs, coherence_times.len());
     
         // Unwrap data_vector and theory
         let data_vector = Arc::try_unwrap(data_vector).expect("Somehow an Arc survived");
@@ -560,7 +562,7 @@ fn coherence_times(total_time: f64, threshold: f64) -> Vec<usize> {
     // Initialize return value
     let mut times = vec![];
 
-    // Find max in in eq (??)
+    // Find max n in eq (??)
     let max_n: usize = (-0.5*(1_000_000.0 / total_time).ln()/(1.0 + threshold).ln()).round() as usize;
 
     for n in 0..=max_n {
