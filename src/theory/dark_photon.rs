@@ -1,5 +1,5 @@
 use super::*;
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Sub};
 use dashmap::DashMap;
 // use goertzel_filter::dft;
 use std::sync::Arc;
@@ -15,6 +15,8 @@ use num_traits::ToPrimitive;
 use ndrustfft::Complex;
 use std::f64::consts::PI;
 use std::f32::consts::PI as SINGLE_PI;
+
+const ZERO: Complex<f32> = Complex::new(0.0, 0.0);
 
 type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
 /// Contains all necessary things
@@ -325,7 +327,7 @@ impl Theory for DarkPhoton {
                 // exp(ix) = cos(x) + i sin(x)
                 //
                 // Note: when you encounter a chunk that has total time < coherence time, the s![start..end] below will truncate it.
-                let cis = Array1::range(0.0, *coherence_time as f32, 1.0)
+                let cis_fh_f = Array1::range(0.0, *coherence_time as f32, 1.0)
                     .map(|x| Complex { re: *x, im: 0.0 })
                     .mul(
                         Complex {
@@ -334,32 +336,35 @@ impl Theory for DarkPhoton {
                         }
                     )
                     .mapv(Complex::exp);
-
-                // Calculate all the trig fds and pads
-                let cosfd = Array1::range(0.0, len_data as f32, 1.0)
-                    .mul(2.0 * SINGLE_PI * FD as f32)
-                    .mapv(f32::cos);
-                let sinfd = Array1::range(0.0, len_data as f32, 1.0)
-                    .mul(2.0 * SINGLE_PI * FD as f32)
-                    .mapv(f32::sin);
-                let cospad = Array1::range(0.0, len_data as f32, 1.0)
-                    .mul(2.0 * SINGLE_PI * approximate_sidereal(frequency_bin) as f32 * frequency_bin.lower as f32)
-                    .mapv(f32::cos);
-                let sinpad = Array1::range(0.0, len_data as f32, 1.0)
-                    .mul(2.0 * SINGLE_PI * approximate_sidereal(frequency_bin) as f32 * frequency_bin.lower as f32)
-                    .mapv(f32::sin);
-
+                let cis_f = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    .map(|x| Complex { re: *x, im: 0.0 })
+                    .mul(
+                        Complex {
+                            re: 0.0, 
+                            im: 2.0 * SINGLE_PI * FD as f32,
+                        }
+                    )
+                    .mapv(Complex::exp);
+                let cis_f_fh = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    .map(|x| Complex { re: *x, im: 0.0 })
+                    .mul(
+                        Complex {
+                            re: 0.0, 
+                            // This minus sign flips (fdhat-fd) --> (fd-fdhat)
+                            im: -2.0 * SINGLE_PI * ((approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed") - FD as f32),
+                        }
+                    )
+                    .mapv(Complex::exp);
                 
                 // TODO: refactor elsewhere to be user input or part of some fit
                 const RHO: f32 = 6.04e7;
                 const R: f32 = 0.0212751;
+                const MUX_PREFACTOR: f32 = SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0;
 
-                // TODO
+                // TODO: actually get H
                 let signal = &auxilary_values;
 
                 for chunk in 0..num_chunks {
-
-                    let inner_chunk_map = DashMap::new();
 
                     // Begining and end index for this chunk in the total series
                     let start: usize  = chunk * coherence_time;
@@ -374,189 +379,496 @@ impl Theory for DarkPhoton {
                     let h6 = signal[5].slice(s![start..end]);
                     let h7 = signal[6].slice(s![start..end]);
 
-                    // muxfd0 is FT of (1 - H1 + iH2) at f=fdhat-fd
-                    let muxfd0 = cis.slice(s![start..end])
+                    // Start of f = fd-fdhat components
+
+                    // mux0 is FT of (1 - H1 + iH2) at f=fd-fdhat
+                    let mux0 = cis_fh_f.slice(s![start..end])
                         .mul(Complex::<f32>::new(1.0, 0.0)
                             .add(h1
                                 .iter()
                                 .zip(h2)
                                 .map(|(&h1_, &h2_)| Complex::new(-h1_, h2_))
                                 .collect::<Array1<_>>()))
-                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .mul(MUX_PREFACTOR)
                         .sum();
-                    inner_chunk_map
-                        .insert(
-                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[0]),
-                            muxfd0
-                        );
 
-                    // muxfd1 is FT of ci * (H2 + iH1) at f=fdhat-fd
-                    let muxfd1 = cis.slice(s![start..end])
+                    // mux1 is FT of (H2 + iH1) at f=fd-fdhat
+                    let mux1 = cis_fh_f.slice(s![start..end])
                         .mul(h1
                             .iter()
                             .zip(h2)
                             .map(|(&h1_, &h2_)| Complex::new(h2_, h1_))
                             .collect::<Array1<_>>())
-                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .mul(MUX_PREFACTOR)
                         .sum();
-                    inner_chunk_map
-                        .insert(
-                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[1]),
-                            muxfd1
-                        );
 
-                    // muxfd2 is FT of ci * (H4 - iH5) at f=fdhat-fd
-                    let muxfd2 = cis.slice(s![start..end])
-                        .mul(signal[3]
-                            .slice(s![start..end])
+                    // mux2 is FT of (H4 - iH5) at f=fd-fdhat
+                    let mux2 = cis_fh_f.slice(s![start..end])
+                        .mul(h4
                             .iter()
-                            .zip(signal[4].slice(s![start..end]))
+                            .zip(h5)
                             .map(|(&h4, &h5)| Complex::new(h4, -h5))
                             .collect::<Array1<_>>())
-                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .mul(MUX_PREFACTOR)
                         .sum();
-                    inner_chunk_map
-                        .insert(
-                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[2]),
-                            muxfd2
-                        );
 
-                    // muxfd3 is FT of ci * (H5 + i(H3-H4)) at f=fdhat-fd
-                    let muxfd3 = cis.slice(s![start..end])
-                        .mul(signal[2]
-                            .slice(s![start..end])
+                    // mux3 is FT of (H5 + i(H3-H4)) at f=fd-fdhat
+                    let mux3 = cis_fh_f.slice(s![start..end])
+                        .mul(h3
                             .iter()
-                            .zip(signal[3].slice(s![start..end]))
-                            .zip(signal[4].slice(s![start..end]))
+                            .zip(h4)
+                            .zip(h5)
                             .map(|((&h3, &h4), &h5)| Complex::new(-h5, h3-h4))
                             .collect::<Array1<_>>())
-                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .mul(MUX_PREFACTOR)
                         .sum();
-                    inner_chunk_map
-                        .insert(
-                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[3]),
-                            muxfd3
-                        );
 
-                    // muxfd4 is FT of ci * (H6 - iH7) at f=fdhat-fd
-                    let muxfd4 = cis.slice(s![start..end])
-                        .mul(signal[5]
-                            .slice(s![start..end])
+                    // mux4 is FT of (H6 - iH7) at f=fd-fdhat
+                    let mux4 = cis_fh_f.slice(s![start..end])
+                        .mul(h6
                             .iter()
-                            .zip(signal[6].slice(s![start..end]))
+                            .zip(h7)
                             .map(|(&h6, &h7)| Complex::new(h6, -h7))
                             .collect::<Array1<_>>())
-                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
+                        .mul(MUX_PREFACTOR)
                         .sum();
-                    inner_chunk_map
-                        .insert(
-                            (-1, DARK_PHOTON_NONZERO_ELEMENTS[4]),
-                            muxfd4
-                        );
 
-                    // start of f=0 components
+                    // start of f=fd components
 
-                    // mux0_0 is FT of ci * (1 - H1 + iH2) at f=fdhat-fd
-                    let mux0_0 = cis.slice(s![start..end])
+                    // mux5 is Real(FT of 2*(1-H1)) = -2*Real(FT of H1-1)
+                    //         + Im(FT of 2*H2)  = 2 * Im(FT fo H2)
+                    // at f = fd
+                    let mux5: Complex<f32> = {
+
+                        // Real(FT of 2*(1-H1)) = -2*Real(FT of (H1-1))
+                        let first_term = -2.0*cis_f.slice(s![start..end])
+                            .mul(&h1.sub(1.0))
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .re;
+
+                        // Im(FT of 2*H2)  = 2 * Im(FT fo H2)
+                        let second_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h2)
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+
+                    // mux6 is Real(FT of 2*H1) + Im(FT of 2*H1)
+                    // at f = fd
+                    let mux6: Complex<f32> = {
+
+                        // Real(FT of 2*H1)
+                        let first_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h2)
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .re;
+                            
+                        // Im(FT of 2*H1)
+                        let second_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h1)
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+
+                    // mux7 is Real(FT of 2*H4) - Im(FT of 2*H5)
+                    // at f = fd
+                    let mux7: Complex<f32> = {
+
+                        // Real(FT of 2*H4)
+                        let first_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h4)
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .re;
+                            
+                        // Im(FT of -2*H5)
+                        let second_term = -2.0*cis_f.slice(s![start..end])
+                            .mul(&h5)
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+                    // mux8 is Real(FT of -2*H5) + Im(FT of 2*(H3-H4))
+                    // at f = fd
+                    let mux8: Complex<f32> = {
+
+                        // Real(FT of 2*H4)
+                        let first_term = -2.0*cis_f.slice(s![start..end])
+                            .mul(&h5)
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .re;
+                            
+                        // Im(FT of -2*H5)
+                        let second_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h3.sub(&h4))
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+                    // mux9 is Real(FT of 2*H6) - Im(FT of 2*H7)
+                    // at f = fd
+                    let mux9: Complex<f32> = {
+
+                        // Real(FT of 2*H4)
+                        let first_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h6)
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .re;
+                            
+                        // Im(FT of -2*H5)
+                        let second_term = -2.0*cis_f.slice(s![start..end])
+                            .mul(&h7)
+                            .mul(MUX_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+                    // start of f = fdhat-fd components
+
+                    // mux10 is FT of (1 - H1 - iH2) at f = fdhat-fd
+                    let mux10: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
                         .mul(Complex::<f32>::new(1.0, 0.0)
-                            .add(signal[0]
-                                .slice(s![start..end])
+                            .add(h1
                                 .iter()
-                                .zip(signal[1].slice(s![start..end]))
-                                .map(|(&h1, &h2)| Complex::new(-h1, h2))
+                                .zip(h2)
+                                .map(|(&h1_, &h2_)| Complex::new(-h1_, -h2_))
                                 .collect::<Array1<_>>()))
-                        .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
-                        .sum()
-                        .re + ;
-                    inner_chunk_map
-                        .insert(
-                            (0, DARK_PHOTON_NONZERO_ELEMENTS[0]),
-                            mux0_0
-                        );
-                    // mux0_1 is FT of ci * (H2 + iH1) at f=fdhat-fd
-                    inner_chunk_map
-                        .insert(
-                            (0, DARK_PHOTON_NONZERO_ELEMENTS[1]),
-                            ci.slice(s![start..end])
-                                .mul(signal[0]
-                                    .slice(s![start..end])
-                                    .iter()
-                                    .zip(signal[1].slice(s![start..end]))
-                                    .map(|(&h1, &h2)| Complex::new(h2, h1))
-                                    .collect::<Array1<_>>())
-                                .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
-                                .sum()
-                        );
-                    // mux0_2 is FT of ci * (H4 - iH5) at f=fdhat-fd
-                    inner_chunk_map
-                        .insert(
-                            (0, DARK_PHOTON_NONZERO_ELEMENTS[2]),
-                            ci.slice(s![start..end])
-                                .mul(signal[3]
-                                    .slice(s![start..end])
-                                    .iter()
-                                    .zip(signal[4].slice(s![start..end]))
-                                    .map(|(&h4, &h5)| Complex::new(h4, -h5))
-                                    .collect::<Array1<_>>())
-                                .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
-                                .sum()
-                        );
-                    // mux0_3 is FT of ci * (H5 + i(H3-H4)) at f=fdhat-fd
-                    inner_chunk_map
-                        .insert(
-                            (0, DARK_PHOTON_NONZERO_ELEMENTS[3]),
-                            ci.slice(s![start..end])
-                                .mul(signal[2]
-                                    .slice(s![start..end])
-                                    .iter()
-                                    .zip(signal[3].slice(s![start..end]))
-                                    .zip(signal[4].slice(s![start..end]))
-                                    .map(|((&h3, &h4), &h5)| Complex::new(-h5, h3-h4))
-                                    .collect::<Array1<_>>())
-                                .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
-                                .sum()
-                        );
-                    // mux0_4 is FT of ci * (H6 - iH7) at f=fdhat-fd
-                    inner_chunk_map
-                        .insert(
-                            (0, DARK_PHOTON_NONZERO_ELEMENTS[4]),
-                            ci.slice(s![start..end])
-                                .mul(signal[5]
-                                    .slice(s![start..end])
-                                    .iter()
-                                    .zip(signal[6].slice(s![start..end]))
-                                    .map(|(&h6, &h7)| Complex::new(h6, -h7))
-                                    .collect::<Array1<_>>())
-                                .mul(SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0)
-                                .sum()
-                        );
+                        .mul(MUX_PREFACTOR)
+                        .sum();
+
+                    // mux11 is FT of (H2 - iH1) at f = fdhat-fd
+                    let mux11: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
+                        .mul(h1
+                            .iter()
+                            .zip(h2)
+                            .map(|(&h1_, &h2_)| Complex::new(h2_, -h1_))
+                            .collect::<Array1<_>>())
+                        .mul(MUX_PREFACTOR)
+                        .sum();
+
+                    // mux12 is FT of (H4 + iH5) at f = fdhat-fd
+                    let mux12: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
+                        .mul(h4
+                            .iter()
+                            .zip(h5)
+                            .map(|(&h4_, &h5_)| Complex::new(h4_, h5_))
+                            .collect::<Array1<_>>())
+                        .mul(MUX_PREFACTOR)
+                        .sum();
+
+                    // mux13 is FT of (H5 + i*(H4 - H3)) at f = fdhat-fd
+                    let mux13: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
+                        .mul(h3
+                            .iter()
+                            .zip(h4)
+                            .zip(h5)
+                            .map(|((&h3_, &h4_), &h5_)| Complex::new(-h5_, h4_-h3_))
+                            .collect::<Array1<_>>())
+                        .mul(MUX_PREFACTOR)
+                        .sum();
+
+                    // mux14 is FT of (H4 + iH5) at f = fdhat-fd
+                    let mux14: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
+                        .mul(h6
+                            .iter()
+                            .zip(h7)
+                            .map(|(&h6_, &h7_)| Complex::new(h6_, h7_))
+                            .collect::<Array1<_>>())
+                        .mul(MUX_PREFACTOR)
+                        .sum();
+
+                    // start of muy
+                    const MUY_PREFACTOR: f32 = MUX_PREFACTOR;
+
+                    // Start of f = fd-fdhat components
+
+                    // muy0 is FT of (H2 + i*(H1-1)) at f=fd-fdhat
+                    let muy0 = cis_fh_f.slice(s![start..end])
+                        .mul(h1
+                            .iter()
+                            .zip(h2)
+                            .map(|(&h1_, &h2_)| Complex::new(h2_, -1.0 + h1_))
+                            .collect::<Array1<_>>())
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // muy1 is FT of (H1 - iH2) at f=fd-fdhat
+                    let muy1 = cis_fh_f.slice(s![start..end])
+                        .mul(h1
+                            .iter()
+                            .zip(h2)
+                            .map(|(&h1_, &h2_)| Complex::new(h1_, -h2_))
+                            .collect::<Array1<_>>())
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // muy2 is FT of (H5 - iH4) at f=fd-fdhat
+                    let muy2 = cis_fh_f.slice(s![start..end])
+                        .mul(h4
+                            .iter()
+                            .zip(h5)
+                            .map(|(&h4, &h5)| Complex::new(-h5, -h4))
+                            .collect::<Array1<_>>())
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // muy3 is FT of (H3 - H4 + iH5) at f=fd-fdhat
+                    let muy3 = cis_fh_f.slice(s![start..end])
+                        .mul(h3
+                            .iter()
+                            .zip(h4)
+                            .zip(h5)
+                            .map(|((&h3, &h4), &h5)| Complex::new(h3-h4, h5))
+                            .collect::<Array1<_>>())
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // muy4 is FT of (H6 - iH7) at f=fd-fdhat
+                    let muy4 = cis_fh_f.slice(s![start..end])
+                        .mul(h6
+                            .iter()
+                            .zip(h7)
+                            .map(|(&h6, &h7)| Complex::new(-h7, -h6))
+                            .collect::<Array1<_>>())
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // start of f=fd components
+
+                    // muy5 is 2*Re(FT(H2)) + 2*Im(FT(H1-1)) at f = fd
+                    let muy5: Complex<f32> = {
+
+                        //  2*Re(FT(H2))
+                        let first_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h2)
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .re;
+
+                        // 2*Im(FT(H1-1))
+                        let second_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h1.sub(1.0))
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+
+                    // muy6 is 2*Re(FT(H1)) - Im(FT(H2)) at f = fd
+                    let muy6: Complex<f32> = {
+
+                        // 2*Re(FT(H1))
+                        let first_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h1)
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .re;
+                            
+                        // -2*Im(FT(H2))
+                        let second_term = -2.0*cis_f.slice(s![start..end])
+                            .mul(&h2)
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+
+                    // muy7 is -2*Re(FT(H5)) - 2*Im(FT(H4)) at f = fd
+                    let muy7: Complex<f32> = {
+
+                        // -2*Re(FT(H5))
+                        let first_term = -2.0*cis_f.slice(s![start..end])
+                            .mul(&h5)
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .re;
+                        
+                        // -2*Im(FT(H4))
+                        let second_term = -2.0*cis_f.slice(s![start..end])
+                            .mul(&h4)
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+                    // muy8 is 2*Re(FT(H3-H4)) + 2*Im(TF(H5)) at f = fd
+                    let muy8: Complex<f32> = {
+
+                        // 2*Re(FT(H3-H4))
+                        let first_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h3.sub(&h4))
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .re;
+                            
+                        // 2*Im(TF(H5))
+                        let second_term = 2.0*cis_f.slice(s![start..end])
+                            .mul(&h5)
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+                    // muy9 is -2*Re(FT(H7)) - 2*Im(FT(H6))
+                    let muy9: Complex<f32> = {
+
+                        // -2*Re(FT(H7))
+                        let first_term = -2.0*cis_f.slice(s![start..end])
+                            .mul(&h7)
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .re;
+                            
+                        // Im(FT of -2*H5)
+                        let second_term = -2.0*cis_f.slice(s![start..end])
+                            .mul(&h6)
+                            .mul(MUY_PREFACTOR)
+                            .sum()
+                            .im;
+                        
+                        (first_term + second_term).into()
+                    };
+
+                    // start of f = fdhat-fd components
+
+                    // TODO: update
+                    // muy10 is FT(H2 + i*(1-H1)) at f = fdhat - fd
+                    let muy10: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
+                        .mul(Complex::<f32>::new(1.0, 0.0)
+                            .add(h1
+                                .iter()
+                                .zip(h2)
+                                .map(|(&h1_, &h2_)| Complex::new(h2_, 1.0-h1_))
+                                .collect::<Array1<_>>()))
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // muy11 is FT(H1 + iH2) at f = fdhat - fd
+                    let muy11: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
+                        .mul(h1
+                            .iter()
+                            .zip(h2)
+                            .map(|(&h1_, &h2_)| Complex::new(h1_, h2_))
+                            .collect::<Array1<_>>())
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // muy12 is FT(-H5 + iH4) at f = fdhat-fd
+                    let muy12: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
+                        .mul(h4
+                            .iter()
+                            .zip(h5)
+                            .map(|(&h4_, &h5_)| Complex::new(h5_, -h4_))
+                            .collect::<Array1<_>>())
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // muy13 is FT(H3-H4+iH5) at f = fdhat-fd
+                    let muy13: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
+                        .mul(h3
+                            .iter()
+                            .zip(h4)
+                            .zip(h5)
+                            .map(|((&h3_, &h4_), &h5_)| Complex::new(h3_ - h4_, h5_))
+                            .collect::<Array1<_>>())
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // muy14 is FT of (H4 + iH5) at f = fdhat-fd
+                    let muy14: Complex<f32> = cis_fh_f
+                        .slice(s![start..end])
+                        .mul(h6
+                            .iter()
+                            .zip(h7)
+                            .map(|(&h6_, &h7_)| Complex::new(-h7_, h6_))
+                            .collect::<Array1<_>>())
+                        .mul(MUY_PREFACTOR)
+                        .sum();
+
+                    // start of muz
+
+                    // lets fill in zero components first
+                    let [muz0, muz1, muz5, muz6, muz10, muz11] = [ZERO; 6];
+
+                    // Now the nonzero components mu2, mu3, mu4, mu7, mu8, mu9, mu12, mu13, mu14
+                    const MUZ_PREFACTOR: f32 = 2.0 * MUX_PREFACTOR;
                     
-                    // mux0[n][k, 0] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end]) - np.sum(cosfd[start:end] * signal[0, start:end]) + np.sum(sinfd[start:end] * signal[1, start:end]))
-                    // mux0[n][k, 1] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[1, start:end]) + np.sum(sinfd[start:end] * signal[0, start:end]))
-                    // mux0[n][k, 2] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[3, start:end]) - np.sum(sinfd[start:end] * signal[4, start:end]))
-                    // mux0[n][k, 3] = math.pi * R * math.sqrt(rho / 2) * (-np.sum(cosfd[start:end] * signal[4, start:end]) + np.sum(sinfd[start:end] * (signal[2, start:end] - signal[3, start:end])))
-                    // mux0[n][k, 4] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[5, start:end]) - np.sum(sinfd[start:end] * signal[6, start:end]))
-            
-                    // muyfd[n][k, 0] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (signal[1, start:end] - 1j * (1 - signal[0, start:end])))
-                    // muyfd[n][k, 1] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (signal[0, start:end] - 1j * signal[1, start:end]))
-                    // muyfd[n][k, 2] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (-signal[4, start:end] - 1j * signal[3, start:end]))
-                    // muyfd[n][k, 3] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (signal[2, start:end] - signal[3, start:end] + 1j * signal[4, start:end]))
-                    // muyfd[n][k, 4] = math.pi * R * math.sqrt(2 * rho) / 4 * np.sum(cis[start:end] * (-signal[6, start:end] - 1j * signal[5, start:end]))
-            
-                    // muy0[n][k, 0] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[1, start:end]) - np.sum(sinfd[start:end]) + np.sum(sinfd[start:end] * signal[0, start:end]))
-                    // muy0[n][k, 1] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * signal[0, start:end]) - np.sum(sinfd[start:end] * signal[1, start:end]))
-                    // muy0[n][k, 2] = math.pi * R * math.sqrt(rho / 2) * (-np.sum(cosfd[start:end] * signal[4, start:end]) - np.sum(sinfd[start:end] * signal[3, start:end]))
-                    // muy0[n][k, 3] = math.pi * R * math.sqrt(rho / 2) * (np.sum(cosfd[start:end] * (signal[2, start:end] - signal[3, start:end])) + np.sum(sinfd[start:end] * signal[4, start:end]))
-                    // muy0[n][k, 4] = math.pi * R * math.sqrt(rho / 2) * (-np.sum(cosfd[start:end] * signal[6, start:end]) - np.sum(sinfd[start:end] * signal[5, start:end]))
-            
-                    // muzfd[n][k, 2] = math.pi * R * math.sqrt(rho / 2) * np.sum((cospad[start:end] + 1j * sinpad[start:end]) * signal[5, start:end])
-                    // muzfd[n][k, 3] = -math.pi * R * math.sqrt(rho / 2) * np.sum((cospad[start:end] + 1j * sinpad[start:end]) * signal[6, start:end])
-                    // muzfd[n][k, 4] = math.pi * R * math.sqrt(rho / 2) * np.sum((cospad[start:end] + 1j * sinpad[start:end]) * (1 - signal[2, start:end]))
-            
-                    // muz0[n][k, 2] = math.pi * R * math.sqrt(rho / 2) * np.sum(signal[5, start:end])
-                    // muz0[n][k, 3] = -math.pi * R * math.sqrt(rho / 2) * np.sum(signal[6, start:end])
-                    // muz0[n][k, 4] = math.pi * R * math.sqrt(rho / 2) * (end - start - np.count_nonzero(np.logical_and(nans >= start, nans < end)) - np.sum(signal[2, start:end]))
-                }
+                    // muz 2, 3, 4 are all at f = -fdhat
+                    let fdhat = (approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed");
+                    let cis_mfh = Array1::range(0.0, *coherence_time as f32, 1.0)
+                        .map(|x| Complex::new(*x, 0.0))
+                        .mul(Complex::new(0.0, 2.0 * SINGLE_PI * -fdhat))
+                        .mapv(Complex::exp);
+                    let cis_fh = Array1::range(0.0, *coherence_time as f32, 1.0)
+                        .map(|x| Complex::new(*x, 0.0))
+                        .mul(Complex::new(0.0, 2.0 * SINGLE_PI * fdhat))
+                        .mapv(Complex::exp);
+
+                    // muz2 is FT(H6) at f = -fdhat
+                    let muz2: Complex<f32> = cis_mfh.mul(&h6).mul(MUZ_PREFACTOR).sum();
+                    // muz3 is FT(-H7) at f = -fdhat
+                    let muz3: Complex<f32> = -cis_mfh.mul(&h7).mul(MUZ_PREFACTOR).sum();
+                    // muz4 is -FT(H3-1) at f = -fdhat (notice negative)
+                    let muz4: Complex<f32> = -cis_mfh.mul(&h3.sub(1.0)).mul(MUZ_PREFACTOR).sum();
+
+                    // muz7 is FT(H6) at f = 0
+                    let muz7: Complex<f32> = h6.mul(MUZ_PREFACTOR).sum().into();
+                    // muz8 is FT(-H7) at f = 0
+                    let muz8: Complex<f32> = -h7.mul(MUZ_PREFACTOR).sum().into();
+                    // muz9 is -FT(H3-1) at f = 0 (notice negative in front of FT)
+                    let muz9: Complex<f32> = -h3.sub(1.0).mul(MUZ_PREFACTOR).sum().into();
+
+                    // muz12 is FT(H6) at f = fdhat
+                    let muz12: Complex<f32> = cis_fh.mul(&h6).mul(MUZ_PREFACTOR).sum();
+                    // muz13 is FT(-H7) at f = fdhat
+                    let muz13: Complex<f32> = -cis_fh.mul(&h7).mul(MUZ_PREFACTOR).sum();
+                    // muz14 is -FT(H3-1) at f = fdhat (notice negative in front of FT)
+                    let muz14: Complex<f32> = -cis_fh.mul(&h3.sub(1.0)).mul(MUZ_PREFACTOR).sum();
+
+                    let chunk_mu = Mu {
+                        x: [mux0, mux1, mux2, mux3, mux4, mux5, mux6, mux7, mux8, mux9, mux10, mux11, mux12, mux13, mux14],
+                        y: [muy0, muy1, muy2, muy3, muy4, muy5, muy6, muy7, muy8, muy9, muy10, muy11, muy12, muy13, muy14],
+                        z: [muz0, muz1, muz2, muz3, muz4, muz5, muz6, muz7, muz8, muz9, muz10, muz11, muz12, muz13, muz14],
+                    };
+
+                    }
             });
 
         DashMap::new()
@@ -564,26 +876,11 @@ impl Theory for DarkPhoton {
 }
 
 #[derive(Default)]
-pub struct Mus {
-    xfd: Mu,
-    x0: Mu,
-    yfd: Mu,
-    y0: Mu,
-    zfd: Mu,
-    z0: Mu,
+pub struct Mu {
+    pub x: [Complex<f32>; 15],
+    pub y: [Complex<f32>; 15],
+    pub z: [Complex<f32>; 15],
 }
-
-pub type Mu = DashMap<
-    usize /* coherence time */, 
-    DashMap<
-        Index /* chunk for this coherence time */,
-        DashMap<
-            NonzeroElement, /* the nonzero element */
-            Array1<Complex<f64>> /* values at all relevant frequencies */
-        >
-    >
->;
-
 
 /// This function takes in the weights w_i along with the station coordinates and calculates H_i(t)
 fn calculate_auxilary_values(

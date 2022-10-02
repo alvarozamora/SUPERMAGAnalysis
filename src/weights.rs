@@ -5,6 +5,7 @@ use crate::{
     utils::async_balancer::*,
     theory::*,
 };
+use itertools::Itertools;
 use mpi::{topology::Communicator, traits::Root};
 use ndarray::{s, Array1, arr1, ArrayViewMut, Array2};
 use dashmap::DashMap;
@@ -72,6 +73,42 @@ pub struct Weights {
     pub we: DashMap<Index, TimeSeries>,
     pub stationarity: Stationarity,
 }
+
+// pub struct StitchedWeights {
+//     pub n: DashMap<StationName, Weight>,
+//     pub e: DashMap<StationName, Weight>,
+//     pub wn: TimeSeries,
+//     pub we: TimeSeries,
+//     pub stationarity: Stationarity,
+// }
+
+// impl Weights {
+
+//     pub fn stitch(self) -> StitchedWeights {
+//         let stitched_n = DashMap::<StationName, Weight>::new();
+//         self.n
+//             .into_iter()
+//             .sorted_by_key(|a| a.0)
+//             .for_each(|(chunk_idx, map)| {
+//                 map
+//                     .into_par_iter()
+//                     .for_each(|(name, series)| {
+//                         stitched_n
+//                             .entry(name)
+//                             .and_modify(|s| s.)
+//                     })
+
+//             })
+
+//         StitchedWeights {
+//             n: DashMap::new(),
+//             e: DashMap::new(),
+//             wn: TimeSeries::zeros(5),
+//             we: TimeSeries::zeros(5),
+//             stationarity: self.stationarity
+//         }
+//     }
+// }
 
 
 pub struct Analysis<T: Theory + Send> {
