@@ -1,25 +1,28 @@
 use super::*;
-use std::{collections::HashMap, ops::Sub};
+use std::{collections::HashMap, ops::{Range, Sub, AddAssign, DivAssign}};
 use dashmap::DashMap;
+use itertools::Itertools;
+use rustfft::{num_complex::ComplexFloat, FftPlanner};
+use serde_derive::{Serialize, Deserialize};
 // use goertzel_filter::dft;
 use std::sync::Arc;
 use crate::{utils::{
     loader::{Dataset, Index},
     approximate_sidereal, coordinates::Coordinates,
-}, constants::{SECONDS_PER_DAY, SIDEREAL_DAY_SECONDS}, weights::Weights};
+}, constants::{SECONDS_PER_DAY, SIDEREAL_DAY_SECONDS}, weights::{Weights, in_longest_subset}};
 use std::ops::{Mul, Div, Add};
-use ndrustfft::{ndfft_r2c, R2cFftHandler, FftHandler, ndfft};
+use ndrustfft::{FftHandler, ndfft};
 use rayon::prelude::*;
-use ndarray::s;
+use ndarray::{s, ArrayView1};
 use num_traits::ToPrimitive;
 use ndrustfft::Complex;
 use std::f64::consts::PI;
 use std::f32::consts::PI as SINGLE_PI;
 
 const ZERO: Complex<f32> = Complex::new(0.0, 0.0);
+const ONE: Complex<f32> = Complex::new(1.0, 0.0);
 
 type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
-/// Contains all necessary things
 #[derive(Clone)]
 pub struct DarkPhoton {
     kinetic_mixing: f64,
@@ -78,16 +81,16 @@ impl DarkPhoton {
         // Calculate vec_sphs at each station
         // let vec_sph_fns = Arc::new(vector_spherical_harmonics(DARK_PHOTON_MODES.clone().into_boxed_slice()));
         // Manual override to remove prefactors
-        let mut vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>> = Arc::new(DashMap::new());
+        let vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>> = Arc::new(DashMap::new());
 
         vec_sph_fns.insert(
             DARK_PHOTON_NONZERO_ELEMENTS[0].clone(),
-            Arc::new(|theta: f32, phi: f32| -> f32 {
+            Arc::new(|_theta: f32, phi: f32| -> f32 {
                 phi.sin()
             }));
         vec_sph_fns.insert(
             DARK_PHOTON_NONZERO_ELEMENTS[1].clone(),
-            Arc::new(|theta: f32, phi: f32| -> f32 {
+            Arc::new(|_theta: f32, phi: f32| -> f32 {
                 phi.cos()
             }));
         vec_sph_fns.insert(
@@ -102,7 +105,7 @@ impl DarkPhoton {
             }));
         vec_sph_fns.insert(
             DARK_PHOTON_NONZERO_ELEMENTS[4].clone(),
-            Arc::new(|theta: f32, phi: f32| -> f32 {
+            Arc::new(|theta: f32, _phi: f32| -> f32 {
                 theta.sin()
             }));
 
@@ -117,13 +120,14 @@ impl DarkPhoton {
     }
 }
 
-
 impl Theory for DarkPhoton {
 
     const MIN_STATIONS: usize = 3;
     const NONZERO_ELEMENTS: usize = 5;
 
-    type AuxilaryValue = [TimeSeries; 7];
+    type AuxiliaryValue = DarkPhotonAuxiliary;
+    type Mu = DarkPhotonMu;
+    type Var = DashMap<(NonzeroElement, NonzeroElement), Array1<Complex<f32>>>;
 
     fn get_nonzero_elements() -> HashSet<NonzeroElement> {
 
@@ -208,6 +212,20 @@ impl Theory for DarkPhoton {
         }
 
         projection_table
+    }
+
+    /// This calculates the auxiliary values for a chunk.
+    fn calculate_auxiliary_values(
+        &self,
+        weights_n: &DashMap<StationName, f32>,
+        weights_e: &DashMap<StationName, f32>,
+        weights_wn: &TimeSeries,
+        weights_we: &TimeSeries,
+        _chunk_dataset: &DashMap<StationName, Dataset>,
+    ) -> Self::AuxiliaryValue {
+        DarkPhotonAuxiliary {
+            h: calculate_auxiliary_values(weights_n, weights_e, weights_wn, weights_we),
+        }
     }
 
     fn calculate_data_vector(
@@ -297,23 +315,16 @@ impl Theory for DarkPhoton {
         local_set: &Vec<(usize, FrequencyBin)>,
         len_data: usize,
         coherence_times: usize,
-        auxilary_values: Self::AuxilaryValue,
-    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f32>>, Array1<Complex<f32>>, Array1<Complex<f32>>)>>> {
-
-        // let mus: DashMap<
-        //     usize /* coherence time */, 
-        //     DashMap<
-        //         Index /* chunk for this coherence time */,
-        //         DashMap<
-        //             NonzeroElement, /* the nonzero element */
-        //             Array1<Complex<f64>> /* values at all relevant frequencies */
-        //         >
-        //     >
-        // > = DashMap::new();
-        let mus = Mus::default();
+        auxiliary_values: Arc<Self::AuxiliaryValue>,
+    ) -> DashMap<usize, DashMap<usize, DarkPhotonMu>> {
 
         // Calculate the sidereal day frequency
         const FD: f64 = 1.0 / SIDEREAL_DAY_SECONDS;
+
+        // Map of Map of mus
+        // First key is coherence time
+        // Second key is chunk time
+        let result = DashMap::with_capacity(coherence_times);
 
         local_set
             .par_iter()
@@ -359,10 +370,10 @@ impl Theory for DarkPhoton {
                 // TODO: refactor elsewhere to be user input or part of some fit
                 const RHO: f32 = 6.04e7;
                 const R: f32 = 0.0212751;
-                const MUX_PREFACTOR: f32 = SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0;
+                let mux_prefactor: f32 = SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0;
 
-                // TODO: actually get H
-                let signal = &auxilary_values;
+                // This is the inner chunk map from chunk to coherence time
+                let inner_chunk_map = DashMap::new();
 
                 for chunk in 0..num_chunks {
 
@@ -370,67 +381,67 @@ impl Theory for DarkPhoton {
                     let start: usize  = chunk * coherence_time;
                     let end: usize = ((chunk + 1) * coherence_time).min(len_data);
 
-                    // Get references to auxilary values for this chunk for better readability
-                    let h1 = signal[0].slice(s![start..end]);
-                    let h2 = signal[1].slice(s![start..end]);
-                    let h3 = signal[2].slice(s![start..end]);
-                    let h4 = signal[3].slice(s![start..end]);
-                    let h5 = signal[4].slice(s![start..end]);
-                    let h6 = signal[5].slice(s![start..end]);
-                    let h7 = signal[6].slice(s![start..end]);
+                    // Get references to auxiliary values for this chunk for better readability
+                    let h1 = auxiliary_values.h[0].slice(s![start..end]);
+                    let h2 = auxiliary_values.h[1].slice(s![start..end]);
+                    let h3 = auxiliary_values.h[2].slice(s![start..end]);
+                    let h4 = auxiliary_values.h[3].slice(s![start..end]);
+                    let h5 = auxiliary_values.h[4].slice(s![start..end]);
+                    let h6 = auxiliary_values.h[5].slice(s![start..end]);
+                    let h7 = auxiliary_values.h[6].slice(s![start..end]);
 
                     // Start of f = fd-fdhat components
 
                     // mux0 is FT of (1 - H1 + iH2) at f=fd-fdhat
-                    let mux0 = cis_fh_f.slice(s![start..end])
+                    let mux0 = (&cis_f_fh)
                         .mul(Complex::<f32>::new(1.0, 0.0)
                             .add(h1
                                 .iter()
                                 .zip(h2)
                                 .map(|(&h1_, &h2_)| Complex::new(-h1_, h2_))
                                 .collect::<Array1<_>>()))
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // mux1 is FT of (H2 + iH1) at f=fd-fdhat
-                    let mux1 = cis_fh_f.slice(s![start..end])
+                    let mux1 = (&cis_f_fh)
                         .mul(h1
                             .iter()
                             .zip(h2)
                             .map(|(&h1_, &h2_)| Complex::new(h2_, h1_))
                             .collect::<Array1<_>>())
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // mux2 is FT of (H4 - iH5) at f=fd-fdhat
-                    let mux2 = cis_fh_f.slice(s![start..end])
+                    let mux2 = (&cis_f_fh)
                         .mul(h4
                             .iter()
                             .zip(h5)
                             .map(|(&h4, &h5)| Complex::new(h4, -h5))
                             .collect::<Array1<_>>())
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // mux3 is FT of (H5 + i(H3-H4)) at f=fd-fdhat
-                    let mux3 = cis_fh_f.slice(s![start..end])
+                    let mux3 = (&cis_f_fh)
                         .mul(h3
                             .iter()
                             .zip(h4)
                             .zip(h5)
                             .map(|((&h3, &h4), &h5)| Complex::new(-h5, h3-h4))
                             .collect::<Array1<_>>())
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // mux4 is FT of (H6 - iH7) at f=fd-fdhat
-                    let mux4 = cis_fh_f.slice(s![start..end])
+                    let mux4 = (&cis_f_fh)
                         .mul(h6
                             .iter()
                             .zip(h7)
                             .map(|(&h6, &h7)| Complex::new(h6, -h7))
                             .collect::<Array1<_>>())
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // start of f=fd components
@@ -441,16 +452,16 @@ impl Theory for DarkPhoton {
                     let mux5: Complex<f32> = {
 
                         // Real(FT of 2*(1-H1)) = -2*Real(FT of (H1-1))
-                        let first_term = -2.0*cis_f.slice(s![start..end])
+                        let first_term = -2.0*(&cis_f)
                             .mul(&h1.sub(1.0))
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .re;
 
                         // Im(FT of 2*H2)  = 2 * Im(FT fo H2)
-                        let second_term = 2.0*cis_f.slice(s![start..end])
+                        let second_term = 2.0*(&cis_f)
                             .mul(&h2)
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .im;
                         
@@ -463,16 +474,16 @@ impl Theory for DarkPhoton {
                     let mux6: Complex<f32> = {
 
                         // Real(FT of 2*H1)
-                        let first_term = 2.0*cis_f.slice(s![start..end])
+                        let first_term = 2.0*(&cis_f)
                             .mul(&h2)
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .re;
                             
                         // Im(FT of 2*H1)
-                        let second_term = 2.0*cis_f.slice(s![start..end])
+                        let second_term = 2.0*(&cis_f)
                             .mul(&h1)
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .im;
                         
@@ -485,16 +496,16 @@ impl Theory for DarkPhoton {
                     let mux7: Complex<f32> = {
 
                         // Real(FT of 2*H4)
-                        let first_term = 2.0*cis_f.slice(s![start..end])
+                        let first_term = 2.0*(&cis_f)
                             .mul(&h4)
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .re;
                             
                         // Im(FT of -2*H5)
-                        let second_term = -2.0*cis_f.slice(s![start..end])
+                        let second_term = -2.0*(&cis_f)
                             .mul(&h5)
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .im;
                         
@@ -506,16 +517,16 @@ impl Theory for DarkPhoton {
                     let mux8: Complex<f32> = {
 
                         // Real(FT of 2*H4)
-                        let first_term = -2.0*cis_f.slice(s![start..end])
+                        let first_term = -2.0*(&cis_f)
                             .mul(&h5)
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .re;
                             
                         // Im(FT of -2*H5)
-                        let second_term = 2.0*cis_f.slice(s![start..end])
+                        let second_term = 2.0*(&cis_f)
                             .mul(&h3.sub(&h4))
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .im;
                         
@@ -527,16 +538,16 @@ impl Theory for DarkPhoton {
                     let mux9: Complex<f32> = {
 
                         // Real(FT of 2*H4)
-                        let first_term = 2.0*cis_f.slice(s![start..end])
+                        let first_term = 2.0*(&cis_f)
                             .mul(&h6)
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .re;
                             
                         // Im(FT of -2*H5)
-                        let second_term = -2.0*cis_f.slice(s![start..end])
+                        let second_term = -2.0*(&cis_f)
                             .mul(&h7)
-                            .mul(MUX_PREFACTOR)
+                            .mul(mux_prefactor)
                             .sum()
                             .im;
                         
@@ -546,116 +557,111 @@ impl Theory for DarkPhoton {
                     // start of f = fdhat-fd components
 
                     // mux10 is FT of (1 - H1 - iH2) at f = fdhat-fd
-                    let mux10: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let mux10: Complex<f32> = (&cis_fh_f)
                         .mul(Complex::<f32>::new(1.0, 0.0)
                             .add(h1
                                 .iter()
                                 .zip(h2)
                                 .map(|(&h1_, &h2_)| Complex::new(-h1_, -h2_))
                                 .collect::<Array1<_>>()))
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // mux11 is FT of (H2 - iH1) at f = fdhat-fd
-                    let mux11: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let mux11: Complex<f32> = (&cis_fh_f)
                         .mul(h1
                             .iter()
                             .zip(h2)
                             .map(|(&h1_, &h2_)| Complex::new(h2_, -h1_))
                             .collect::<Array1<_>>())
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // mux12 is FT of (H4 + iH5) at f = fdhat-fd
-                    let mux12: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let mux12: Complex<f32> = (&cis_fh_f)
                         .mul(h4
                             .iter()
                             .zip(h5)
                             .map(|(&h4_, &h5_)| Complex::new(h4_, h5_))
                             .collect::<Array1<_>>())
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // mux13 is FT of (H5 + i*(H4 - H3)) at f = fdhat-fd
-                    let mux13: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let mux13: Complex<f32> = (&cis_fh_f)
                         .mul(h3
                             .iter()
                             .zip(h4)
                             .zip(h5)
                             .map(|((&h3_, &h4_), &h5_)| Complex::new(-h5_, h4_-h3_))
                             .collect::<Array1<_>>())
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // mux14 is FT of (H4 + iH5) at f = fdhat-fd
-                    let mux14: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let mux14: Complex<f32> = (&cis_fh_f)
                         .mul(h6
                             .iter()
                             .zip(h7)
                             .map(|(&h6_, &h7_)| Complex::new(h6_, h7_))
                             .collect::<Array1<_>>())
-                        .mul(MUX_PREFACTOR)
+                        .mul(mux_prefactor)
                         .sum();
 
                     // start of muy
-                    const MUY_PREFACTOR: f32 = MUX_PREFACTOR;
+                    let muy_prefactor: f32 = mux_prefactor;
 
                     // Start of f = fd-fdhat components
 
                     // muy0 is FT of (H2 + i*(H1-1)) at f=fd-fdhat
-                    let muy0 = cis_fh_f.slice(s![start..end])
+                    let muy0 = (&cis_f_fh)
                         .mul(h1
                             .iter()
                             .zip(h2)
                             .map(|(&h1_, &h2_)| Complex::new(h2_, -1.0 + h1_))
                             .collect::<Array1<_>>())
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // muy1 is FT of (H1 - iH2) at f=fd-fdhat
-                    let muy1 = cis_fh_f.slice(s![start..end])
+                    let muy1 = (&cis_f_fh)
                         .mul(h1
                             .iter()
                             .zip(h2)
                             .map(|(&h1_, &h2_)| Complex::new(h1_, -h2_))
                             .collect::<Array1<_>>())
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // muy2 is FT of (H5 - iH4) at f=fd-fdhat
-                    let muy2 = cis_fh_f.slice(s![start..end])
+                    let muy2 = (&cis_f_fh)
                         .mul(h4
                             .iter()
                             .zip(h5)
                             .map(|(&h4, &h5)| Complex::new(-h5, -h4))
                             .collect::<Array1<_>>())
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // muy3 is FT of (H3 - H4 + iH5) at f=fd-fdhat
-                    let muy3 = cis_fh_f.slice(s![start..end])
+                    let muy3 = (&cis_f_fh)
                         .mul(h3
                             .iter()
                             .zip(h4)
                             .zip(h5)
                             .map(|((&h3, &h4), &h5)| Complex::new(h3-h4, h5))
                             .collect::<Array1<_>>())
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // muy4 is FT of (H6 - iH7) at f=fd-fdhat
-                    let muy4 = cis_fh_f.slice(s![start..end])
+                    let muy4 = (&cis_f_fh)
                         .mul(h6
                             .iter()
                             .zip(h7)
                             .map(|(&h6, &h7)| Complex::new(-h7, -h6))
                             .collect::<Array1<_>>())
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // start of f=fd components
@@ -664,16 +670,16 @@ impl Theory for DarkPhoton {
                     let muy5: Complex<f32> = {
 
                         //  2*Re(FT(H2))
-                        let first_term = 2.0*cis_f.slice(s![start..end])
+                        let first_term = 2.0*(&cis_f)
                             .mul(&h2)
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .re;
 
                         // 2*Im(FT(H1-1))
-                        let second_term = 2.0*cis_f.slice(s![start..end])
+                        let second_term = 2.0*(&cis_f)
                             .mul(&h1.sub(1.0))
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .im;
                         
@@ -685,16 +691,16 @@ impl Theory for DarkPhoton {
                     let muy6: Complex<f32> = {
 
                         // 2*Re(FT(H1))
-                        let first_term = 2.0*cis_f.slice(s![start..end])
+                        let first_term = 2.0*(&cis_f)
                             .mul(&h1)
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .re;
                             
                         // -2*Im(FT(H2))
-                        let second_term = -2.0*cis_f.slice(s![start..end])
+                        let second_term = -2.0*(&cis_f)
                             .mul(&h2)
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .im;
                         
@@ -706,16 +712,16 @@ impl Theory for DarkPhoton {
                     let muy7: Complex<f32> = {
 
                         // -2*Re(FT(H5))
-                        let first_term = -2.0*cis_f.slice(s![start..end])
+                        let first_term = -2.0*(&cis_f)
                             .mul(&h5)
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .re;
                         
                         // -2*Im(FT(H4))
-                        let second_term = -2.0*cis_f.slice(s![start..end])
+                        let second_term = -2.0*(&cis_f)
                             .mul(&h4)
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .im;
                         
@@ -726,16 +732,16 @@ impl Theory for DarkPhoton {
                     let muy8: Complex<f32> = {
 
                         // 2*Re(FT(H3-H4))
-                        let first_term = 2.0*cis_f.slice(s![start..end])
+                        let first_term = 2.0*(&cis_f)
                             .mul(&h3.sub(&h4))
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .re;
                             
                         // 2*Im(TF(H5))
-                        let second_term = 2.0*cis_f.slice(s![start..end])
+                        let second_term = 2.0*(&cis_f)
                             .mul(&h5)
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .im;
                         
@@ -746,16 +752,16 @@ impl Theory for DarkPhoton {
                     let muy9: Complex<f32> = {
 
                         // -2*Re(FT(H7))
-                        let first_term = -2.0*cis_f.slice(s![start..end])
+                        let first_term = -2.0*(&cis_f)
                             .mul(&h7)
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .re;
                             
                         // Im(FT of -2*H5)
-                        let second_term = -2.0*cis_f.slice(s![start..end])
+                        let second_term = -2.0*(&cis_f)
                             .mul(&h6)
-                            .mul(MUY_PREFACTOR)
+                            .mul(muy_prefactor)
                             .sum()
                             .im;
                         
@@ -766,60 +772,55 @@ impl Theory for DarkPhoton {
 
                     // TODO: update
                     // muy10 is FT(H2 + i*(1-H1)) at f = fdhat - fd
-                    let muy10: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let muy10: Complex<f32> = (&cis_fh_f)
                         .mul(Complex::<f32>::new(1.0, 0.0)
                             .add(h1
                                 .iter()
                                 .zip(h2)
                                 .map(|(&h1_, &h2_)| Complex::new(h2_, 1.0-h1_))
                                 .collect::<Array1<_>>()))
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // muy11 is FT(H1 + iH2) at f = fdhat - fd
-                    let muy11: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let muy11: Complex<f32> = (&cis_fh_f)
                         .mul(h1
                             .iter()
                             .zip(h2)
                             .map(|(&h1_, &h2_)| Complex::new(h1_, h2_))
                             .collect::<Array1<_>>())
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // muy12 is FT(-H5 + iH4) at f = fdhat-fd
-                    let muy12: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let muy12: Complex<f32> = (&cis_fh_f)
                         .mul(h4
                             .iter()
                             .zip(h5)
                             .map(|(&h4_, &h5_)| Complex::new(h5_, -h4_))
                             .collect::<Array1<_>>())
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // muy13 is FT(H3-H4+iH5) at f = fdhat-fd
-                    let muy13: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let muy13: Complex<f32> = (&cis_fh_f)
                         .mul(h3
                             .iter()
                             .zip(h4)
                             .zip(h5)
                             .map(|((&h3_, &h4_), &h5_)| Complex::new(h3_ - h4_, h5_))
                             .collect::<Array1<_>>())
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // muy14 is FT of (H4 + iH5) at f = fdhat-fd
-                    let muy14: Complex<f32> = cis_fh_f
-                        .slice(s![start..end])
+                    let muy14: Complex<f32> = (&cis_fh_f)
                         .mul(h6
                             .iter()
                             .zip(h7)
                             .map(|(&h6_, &h7_)| Complex::new(-h7_, h6_))
                             .collect::<Array1<_>>())
-                        .mul(MUY_PREFACTOR)
+                        .mul(muy_prefactor)
                         .sum();
 
                     // start of muz
@@ -828,7 +829,7 @@ impl Theory for DarkPhoton {
                     let [muz0, muz1, muz5, muz6, muz10, muz11] = [ZERO; 6];
 
                     // Now the nonzero components mu2, mu3, mu4, mu7, mu8, mu9, mu12, mu13, mu14
-                    const MUZ_PREFACTOR: f32 = 2.0 * MUX_PREFACTOR;
+                    let muz_prefactor: f32 = 2.0 * mux_prefactor;
                     
                     // muz 2, 3, 4 are all at f = -fdhat
                     let fdhat = (approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed");
@@ -842,57 +843,266 @@ impl Theory for DarkPhoton {
                         .mapv(Complex::exp);
 
                     // muz2 is FT(H6) at f = -fdhat
-                    let muz2: Complex<f32> = cis_mfh.mul(&h6).mul(MUZ_PREFACTOR).sum();
+                    let muz2: Complex<f32> = (&cis_mfh).mul(&h6).mul(muz_prefactor).sum();
                     // muz3 is FT(-H7) at f = -fdhat
-                    let muz3: Complex<f32> = -cis_mfh.mul(&h7).mul(MUZ_PREFACTOR).sum();
+                    let muz3: Complex<f32> = -(&cis_mfh).mul(&h7).mul(muz_prefactor).sum();
                     // muz4 is -FT(H3-1) at f = -fdhat (notice negative)
-                    let muz4: Complex<f32> = -cis_mfh.mul(&h3.sub(1.0)).mul(MUZ_PREFACTOR).sum();
+                    let muz4: Complex<f32> = -(&cis_mfh).mul(&h3.sub(1.0)).mul(muz_prefactor).sum();
 
+                    // Note: These terms need the - along with prefactor for the f32 -> Complex<f32> into() to work
                     // muz7 is FT(H6) at f = 0
-                    let muz7: Complex<f32> = h6.mul(MUZ_PREFACTOR).sum().into();
+                    let muz7: Complex<f32> = h6.mul(muz_prefactor).sum().into();
                     // muz8 is FT(-H7) at f = 0
-                    let muz8: Complex<f32> = -h7.mul(MUZ_PREFACTOR).sum().into();
+                    let muz8: Complex<f32> = h7.mul(-muz_prefactor).sum().into();
                     // muz9 is -FT(H3-1) at f = 0 (notice negative in front of FT)
-                    let muz9: Complex<f32> = -h3.sub(1.0).mul(MUZ_PREFACTOR).sum().into();
+                    let muz9: Complex<f32> = h3.sub(1.0).mul(-muz_prefactor).sum().into();
 
                     // muz12 is FT(H6) at f = fdhat
-                    let muz12: Complex<f32> = cis_fh.mul(&h6).mul(MUZ_PREFACTOR).sum();
+                    let muz12: Complex<f32> = (&cis_fh).mul(&h6).mul(muz_prefactor).sum();
                     // muz13 is FT(-H7) at f = fdhat
-                    let muz13: Complex<f32> = -cis_fh.mul(&h7).mul(MUZ_PREFACTOR).sum();
+                    let muz13: Complex<f32> = -(&cis_fh).mul(&h7).mul(muz_prefactor).sum();
                     // muz14 is -FT(H3-1) at f = fdhat (notice negative in front of FT)
-                    let muz14: Complex<f32> = -cis_fh.mul(&h3.sub(1.0)).mul(MUZ_PREFACTOR).sum();
+                    let muz14: Complex<f32> = -(&cis_fh).mul(&h3.sub(1.0)).mul(muz_prefactor).sum();
 
-                    let chunk_mu = Mu {
+                    let chunk_mu = DarkPhotonMu {
                         x: [mux0, mux1, mux2, mux3, mux4, mux5, mux6, mux7, mux8, mux9, mux10, mux11, mux12, mux13, mux14],
                         y: [muy0, muy1, muy2, muy3, muy4, muy5, muy6, muy7, muy8, muy9, muy10, muy11, muy12, muy13, muy14],
                         z: [muz0, muz1, muz2, muz3, muz4, muz5, muz6, muz7, muz8, muz9, muz10, muz11, muz12, muz13, muz14],
                     };
 
-                    }
+                    // Insert chunk mu into chunk map
+                    inner_chunk_map.insert(
+                        chunk,
+                        chunk_mu,
+                    );
+                }
+                
+                // Insert chunk map into coherence time map
+                result.insert(
+                    *coherence_time,
+                    inner_chunk_map,
+                );
             });
+        result
+    }
 
-        DashMap::new()
+
+    fn calculate_var_theory(
+        &self,
+        set: &Vec<(usize, FrequencyBin)>,
+        projections_complete: &DashMap<NonzeroElement, TimeSeries>,
+        coherence_times: usize,
+        days: Range<usize>,
+        stationarity: Stationarity,
+        auxiliary_values: Arc<Self::AuxiliaryValue>,
+    ) -> DashMap<usize, Self::Var> {
+        
+        // Map of Map of Vars
+        // key is stationary time chunk (e.g. year)
+        let spectra = DashMap::with_capacity(coherence_times);
+
+        /// Size of chunks
+        const TAU: usize = 16384 * 64;
+        let downtime = 0;
+
+        // for year in 2004..2020 {
+        // NOTE: This is hardcoded for stationarity = 1 year
+        // TODO: make parallel again
+        // (2004..2020).into_par_iter().for_each(|year| {
+        (2004..2020).into_iter().for_each(|year| {
+
+            // Get stationarity period indices (place within entire SUPERMAG dataset)
+            // NOTE: this definition varies from original implementation. The original
+            // python implementation defines the `end` index to be the first index of the
+            // next chunk, since start:end is not end inclusive. This means the size of 
+            // the chunks are (end - start + 1)
+            let (start, end) = stationarity.get_year_indices(year);
+            
+            // Now convert these indices to the indices within the subset used
+            let secs = (days.start * 24 * 60 * 60)..(days.end * 24 * 60 * 60);
+            let (start, end) = (
+                secs.clone().position(|i| i == start).expect("sec index is out of bounds"), 
+                secs.clone().position(|i| i == end).expect("sec index is out of bounds"),
+            );
+            assert_ne!(start, end, "zero size");
+
+            // Get the subseries for this year
+            let projections_subset: DashMap<NonzeroElement, Vec<f32>> = projections_complete
+                .iter()
+                .map(|kv| {
+                    // Get element and series
+                    let (element, complete_series) = kv.pair();
+                    println!("getting yearly subset {}..={} of complete series with length {}", start, end, complete_series.len());
+                    let pair = (element.clone(), complete_series.slice(s![start..=end]).to_vec());
+                    println!("got yearly subset of complete series");
+                    pair
+                }).collect();
+        
+            // Get chunk indices
+            let num_chunks: usize = ((end - start + 1) / TAU).max(1);
+            let chunk_size: usize = (end - start + 1) / num_chunks;
+            let chunk_mod: usize = (end - start + 1) % num_chunks;
+            let chunks: Vec<[usize; 2]> = (0..num_chunks)
+                .map(|k| {
+                    [k * (chunk_size + downtime) + k.min(chunk_mod), k * (chunk_size + downtime) + (k + 1).min(chunk_mod) + chunk_size]
+                }).collect_vec();
+            dbg!(&chunks);
+
+            // Set up an fft planner to reuse for all ffts in this year
+            let mut planner = FftPlanner::new();
+            let fft_handler = planner.plan_fft_forward(2*TAU);
+            let mut scratch = vec![0.0.into(); 2*TAU];
+        
+            let mut chunk_collection = Vec::with_capacity(chunks.len());
+            for chunk in chunks {
+
+                // Get the data for this chunk, pad it to have length equal to a power of 2, and take its fft
+                let chunk_ffts: Vec<(NonzeroElement, Array1<Complex<f32>>)> = projections_subset
+                    .iter()
+                    .map(|kv| {
+
+                        // Get element and series
+                        let (element, year_series) = kv.pair();
+
+                        // Get chunk from year
+                        println!("getting chunk from year");
+                        let chunk_from_year = &year_series[chunk[0]..chunk[1]];
+                        println!("got chunk from year");
+
+                        // Padded series
+                        let chunk_size = chunk[1] - chunk[0];
+                        let mut padded_series = Array1::<Complex<f32>>::zeros(2*TAU);
+                        println!(
+                            "size of chunk is {}, being placed in a {} series of zeros",
+                            chunk_size, padded_series.len(),
+                        );
+
+                        println!("modifying series");
+                        padded_series
+                            .slice_mut(s![0..chunk_size])
+                            .iter_mut()
+                            .zip(chunk_from_year)
+                            .for_each(|(ps, s)| { *ps = s.into(); });
+                        println!("modified series");
+
+
+                        // FFT of padded series
+                        fft_handler
+                            .process_with_scratch(padded_series.as_slice_mut().expect("should be in contiguous order"), &mut scratch);
+                            
+                        (element.clone(), padded_series)
+                    }).collect();
+
+                // Initialize dashmap for correlation
+                let chunk_ffts_squared: DashMap<(NonzeroElement, NonzeroElement), Array1<Complex<f32>>> = DashMap::new();
+                let nancount = 0;
+                for (e1, fft1) in chunk_ffts.iter() {
+                    for (e2, fft2) in chunk_ffts.iter() {
+                        chunk_ffts_squared.insert(
+                            (e1.clone(), e2.clone()),
+                             // TODO: verify formula
+                             (fft1 * fft2.map(Complex::conj)).mul(2.0) / ( /* original had 60* */ (chunk[1] - chunk[0] - nancount)) as f32
+                        );
+                    }
+                }
+
+                chunk_collection.push(chunk_ffts_squared);
+            }
+
+            // Take the average. 
+            // First, initialize zero arrays 
+            let avg_power: DashMap<(NonzeroElement, NonzeroElement), Array1<Complex<f32>>> = DARK_PHOTON_NONZERO_ELEMENTS
+                .iter()
+                .combinations(2)
+                .map(|elements| ((elements[0].clone(), elements[1].clone()), Array1::zeros(2*TAU)))
+                .collect();
+            // Then, sum
+            let denominator = chunk_collection.len() as f32;
+            chunk_collection
+                .into_iter()
+                .for_each(|chunk| {
+                    chunk
+                        .into_iter()
+                        .for_each(|(element, power)| {
+                            avg_power
+                                .get_mut(&element)
+                                .expect("nonzero element should exist")
+                                .add_assign(&power);
+                        })
+                });
+
+            // Finally, divide
+            avg_power
+                .iter_mut()
+                .for_each(|mut kv| kv.value_mut().div_assign(denominator * ONE));
+
+            
+            // Add along with the rest of the stationarity times
+            spectra.insert(year, avg_power);
+            
+        });
+        
+        spectra
     }
 }
 
 #[derive(Default)]
-pub struct Mu {
+pub struct DarkPhotonMu {
+    // #[serde(with = "ComplexDef")]
     pub x: [Complex<f32>; 15],
+    // #[serde(with = "ComplexDef")]
     pub y: [Complex<f32>; 15],
+    // #[serde(with = "ComplexDef")]
     pub z: [Complex<f32>; 15],
 }
 
+// #[derive(Serialize, Deserialize)]
+// #[serde(remote = "Complex")]
+// pub struct ComplexDef<T>
+// {
+//     re: T,
+//     im: T,
+// }
+
+impl serde::Serialize for DarkPhotonMu {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        (
+            &self.x.map(|x| (x.re, x.im)),
+            &self.y.map(|y| (y.re, y.im)),
+            &self.z.map(|z| (z.re, z.im)),
+        
+        ).serialize(serializer)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for DarkPhotonMu {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let (x, y, z): ([(f32, f32); 15], [(f32, f32); 15], [(f32, f32); 15]) = serde::Deserialize::deserialize(deserializer)?;
+        Ok(DarkPhotonMu { 
+            x: x.map(|(re, im)| Complex::new(re, im)),
+            y: y.map(|(re, im)| Complex::new(re, im)),
+            z: z.map(|(re, im)| Complex::new(re, im)),
+        })
+    }
+}
+
+
+
+
 /// This function takes in the weights w_i along with the station coordinates and calculates H_i(t)
-fn calculate_auxilary_values(
+fn calculate_auxiliary_values(
     weights_n: &DashMap<StationName, f32>,
     weights_e: &DashMap<StationName, f32>,
     weights_wn: &TimeSeries,
     weights_we: &TimeSeries,
     // chunk_dataset: &DashMap<StationName, Dataset>,
-) -> DashMap<usize, TimeSeries> {
-
-    // Initialize auxilary_value table
-    let auxilary_value_series_plural = DashMap::new();
+) -> [TimeSeries; 7] {
 
     // Gather coordinate table
     let coordinates = construct_coordinate_map();
@@ -900,12 +1110,12 @@ fn calculate_auxilary_values(
     // Get size of series
     let size = weights_wn.len();
 
-    for i in 1..=7 {
+    let auxiliary_values = [1, 2, 3, 4, 5, 6, 7].map(|i| {
 
         // Here we iterate thrhough weights_n and not chunk_dataset because
         // stations in weight_n are a subset (filtered) of those in chunk_dataset.
         // Could perhaps save memory by dropping coressponding invalid datasets in chunk_dataset.
-        let auxilary_value_series_unnormalized: TimeSeries = weights_n
+        let auxiliary_value_series_unnormalized: TimeSeries = weights_n
             .iter()
             .map(|key_value| {
 
@@ -919,7 +1129,7 @@ fn calculate_auxilary_values(
                     .expect("station coordinates should exist");
 
                 // Get product of relevant component of vector spherical harmonics and of the magnetic field.
-                let auxilary_value = match i {
+                let auxiliary_value = match i {
                     
                     // H1 summand = wn * cos(phi)^2
                     1 => (sc.longitude.cos().powi(2) as f32).mul(*weights_n.get(station_name).unwrap()),
@@ -946,27 +1156,26 @@ fn calculate_auxilary_values(
                     _ => unreachable!("hardcoded to iterate from 1 to 7"),
                 };
 
-                auxilary_value
+                auxiliary_value
             })
             .fold(TimeSeries::default(size), |acc, series| acc.add(series));
 
             // Divide by correct Wi
-            let auxilary_value_series_normalized = match i {
-                1 => auxilary_value_series_unnormalized.div(weights_wn),
-                2 => auxilary_value_series_unnormalized.div(weights_wn),
-                3 => auxilary_value_series_unnormalized.div(weights_we),
-                4 => auxilary_value_series_unnormalized.div(weights_we),
-                5 => auxilary_value_series_unnormalized.div(weights_we),
-                6 => auxilary_value_series_unnormalized.div(weights_we),
-                7 => auxilary_value_series_unnormalized.div(weights_we),
+            let auxiliary_value_series_normalized = match i {
+                1 => auxiliary_value_series_unnormalized.div(weights_wn),
+                2 => auxiliary_value_series_unnormalized.div(weights_wn),
+                3 => auxiliary_value_series_unnormalized.div(weights_we),
+                4 => auxiliary_value_series_unnormalized.div(weights_we),
+                5 => auxiliary_value_series_unnormalized.div(weights_we),
+                6 => auxiliary_value_series_unnormalized.div(weights_we),
+                7 => auxiliary_value_series_unnormalized.div(weights_we),
                 _ => unreachable!("hardcoded to iterate from 1 to 7")
             }; 
 
-        // Insert combined time series for this nonzero element for this chunk, ensuring no duplicate entry
-        assert!(auxilary_value_series_plural.insert(i, auxilary_value_series_normalized).is_none(), "Somehow made a duplicate entry");
-    }
+        auxiliary_value_series_normalized
+    });
 
-    auxilary_value_series_plural
+    auxiliary_values
 }
 
 
@@ -977,19 +1186,67 @@ fn calculate_auxilary_values(
 /// 
 /// At k = 0, this results in 0/0, requiring the use of the L'Hospital rule. As such,
 /// this case is dealt separately.
-fn one_tilde(
-    coherence_time: f64,
-    chunk_index: usize,
-    number_of_chunks: usize,
-    k: f64,
-) -> Complex<f64> {
-    match k {
+// fn one_tilde(
+//     coherence_time: f64,
+//     chunk_index: usize,
+//     number_of_chunks: usize,
+//     k: f64,
+// ) -> Complex<f64> {
+//     match k {
         
-        // Deal with L'Hospital limit separately
-        0.0 => Complex::new(coherence_time, 0.0),
+//         // Deal with L'Hospital limit separately
+//         _k if k.is_zero() => Complex::new(coherence_time, 0.0),
 
-        // Otherwise, evaluate function
-        _ => (Complex::new(0.0, (1.0 - ((chunk_index + number_of_chunks) as f64 * coherence_time)/number_of_chunks as f64) * k).exp())*(-1.0 + Complex::new(0.0, coherence_time * k).exp())
-                / (-1.0 + Complex::new(0.0, k).exp())
+//         // Otherwise, evaluate function
+//         _ => (Complex::new(0.0, (1.0 - ((chunk_index + number_of_chunks) as f64 * coherence_time)/number_of_chunks as f64) * k).exp())*(-1.0 + Complex::new(0.0, coherence_time * k).exp())
+//                 / (-1.0 + Complex::new(0.0, k).exp())
+//     }
+// }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DarkPhotonAuxiliary {
+    pub h: [TimeSeries; 7]
+}
+
+impl FromChunkMap for DarkPhotonAuxiliary {
+    fn from_chunk_map(
+        auxiliary_values_chunked: &DashMap<usize, Self>,
+        secs_per_chunk: usize,
+        starting_value: usize,
+        size: usize,
+    ) -> Self {
+
+        // Initialie auxiliary array to zeros
+        let mut auxiliary_values = [(); 7]
+            .map(|_| TimeSeries::zeros(size * secs_per_chunk));
+
+        auxiliary_values_chunked
+            .iter()
+            .for_each(|chunk| {
+
+                // Get chunk and it's auxiliary_value
+                let (&current_chunk, chunk_auxiliary) = chunk.pair();
+
+                if !in_longest_subset(current_chunk, size, starting_value) {
+                    return ()
+                }
+
+                // Insert array into complete series
+                // TODO: THIS ASSUMES ALL CHUNKS ARE THE SAME LENGTH.
+                // NEED TO CHANGE FOR YEARLY STATIONARITY AND PERHAPS THE EDGE CHUNKS.
+                let start_index = (current_chunk-starting_value)*chunk_auxiliary.h[0].len();
+                let end_index = start_index + chunk_auxiliary.h[0].len();
+
+                for i in 0..7 {
+                    auxiliary_values
+                    .get_mut(i)
+                    .unwrap()
+                    .slice_mut(s![start_index..end_index])
+                    .assign(&chunk_auxiliary.h[i]);
+                }
+            });
+                    
+        
+        DarkPhotonAuxiliary { h: auxiliary_values }
     }
 }
