@@ -9,7 +9,9 @@ use itertools::Itertools;
 use mpi::{topology::Communicator, traits::Root};
 use ndarray::{s, Array1, arr1, ArrayViewMut, Array2};
 use dashmap::DashMap;
-use std::{sync::Arc, ops::RangeInclusive};
+use serde::{Serialize, Deserialize};
+use tokio::{fs::File, io::AsyncWriteExt};
+use std::{sync::Arc, ops::RangeInclusive, error::Error, marker::PhantomData};
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::ops::AddAssign;
@@ -71,8 +73,32 @@ pub struct Weights {
     pub e: DashMap<Index, DashMap<StationName, Weight>>,
     pub wn: DashMap<Index, TimeSeries>,
     pub we: DashMap<Index, TimeSeries>,
-    pub stationarity: Stationarity,
+    pub coherence: Coherence,
 }
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ProjectionsComplete {
+
+    /// The complete time series of the projections for every nonzero element
+    pub projections_complete: DashMap<NonzeroElement, TimeSeries>,
+
+    /// The second at which this series begins, where t=0 is the first second available in the dataset.
+    pub start_second: usize,
+
+    /// Days used
+    pub days: Range<usize>,
+}
+use dashmap::iter::Iter;
+
+impl ProjectionsComplete {
+    pub fn iter(&self) -> Iter<NonzeroElement, TimeSeries> {
+        self.projections_complete.iter()
+    }
+    pub fn len(&self) -> usize {
+        self.projections_complete.len()
+    }
+}
+
 
 // pub struct StitchedWeights {
 //     pub n: DashMap<StationName, Weight>,
@@ -111,12 +137,14 @@ pub struct Weights {
 // }
 
 
-pub struct Analysis<T: Theory + Send> {
-    pub weights: Arc<Weights>,
-    pub theory: T,
-    pub projections: Arc<DashMap<Index, DashMap<NonzeroElement, TimeSeries>>>,
-    pub data_vector: DashMap<Index, DashMap<NonzeroElement, ComplexSeries>>,
-}
+pub struct Analysis<T>(PhantomData<T>);
+// <T: Theory + Send>;
+// {
+//     pub weights: Arc<Weights>,
+//     pub theory: T,
+//     pub projections: Arc<DashMap<Index, DashMap<NonzeroElement, TimeSeries>>>,
+//     pub data_vector: DashMap<Index, DashMap<NonzeroElement, ComplexSeries>>,
+// }
 
 impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
@@ -217,18 +245,34 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
     /// This runs an analysis for a given theory. It chunks the data into the specified intervals,
     /// calculates the inverse white noise (i.e. weights) (similar to eq 13 and 14 in the paper)
     ///  and calculates the data vector on said chunks of data.
-    pub async fn new(stationarity: Stationarity, theory: T, balancer: &mut Manager<()>) -> Arc<Self> {
+    /// 
+    /// NOTES
+    /// [ ] Change station criteria so that series with at least one valid point are included
+    /// Chuck all data prior to 2003
+    /// Do coordinate transformation: linearly interpolate between the values in `IGRF_declinations_for_1sec.txt`. The values given are for the start of the 180th day of each year.
+    pub async fn calculate_projections_and_auxiliary(
+        // stationarity: Stationarity,
+        coherence: Coherence,
+        theory: T,
+        days: Option<Range<usize>>,
+        balancer: &mut Manager<()>
+    ) -> Result<(), Box<dyn Error>> {
 
         println!("Running Analysis");
 
-        // Number of days per chunk
-        let days: usize = match stationarity {
-            Stationarity::Yearly => todo!(),
-            Stationarity::Daily(days) => days,
+        // // Number of days per chunk
+        // let stationarity: usize = match stationarity {
+        //     Stationarity::Yearly => todo!(),
+        //     Stationarity::Daily(days) => days,
+        // };
+
+        let days_per_chunk = match coherence {
+            Coherence::Days(days) => days,
+            Coherence::Yearly => todo!(),
         };
 
         // Grab dataset loader for the chunks
-        let loader = Arc::new(DatasetLoader::new(days));
+        let loader = Arc::new(DatasetLoader::new(days.clone(), coherence));
 
         // Initialize empty `Weights`
         let weights: Arc<Weights> = Arc::new(Weights {
@@ -236,12 +280,12 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 e: DashMap::new(),
                 wn: DashMap::new(),
                 we: DashMap::new(),
-                stationarity,
+                coherence,
         });
 
         // Initialize empty data vector, projections
-        let data_vector = Arc::new(DashMap::new());
         let projections = Arc::new(DashMap::new());
+        let auxiliary_values = Arc::new(DashMap::new());
 
         // Wrap theory in an Arc
         let theory = Arc::new(theory);
@@ -257,8 +301,8 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             let local_weights: Arc<_> = weights.clone();
             let local_loader: Arc<_> = loader.clone();
             let local_theory: Arc<_> = theory.clone();
-            let local_data_vector: Arc<_> = data_vector.clone();
             let local_projections: Arc<_> = projections.clone();
+            let local_auxiliary: Arc<_> = auxiliary_values.clone();
 
             // Create a new task for each `chunk`
             balancer.
@@ -280,8 +324,8 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     // Local hashmaps and time series
                     let local_hashmap_n: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
                     let local_hashmap_e: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
-                    let mut local_wn: TimeSeries = Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY]);
-                    let mut local_we: TimeSeries = Array1::from_vec(vec![0.0_f32; days * SECONDS_PER_DAY]);
+                    let mut local_wn: TimeSeries = Array1::from_vec(vec![0.0_f32; days_per_chunk * SECONDS_PER_DAY]);
+                    let mut local_we: TimeSeries = Array1::from_vec(vec![0.0_f32; days_per_chunk * SECONDS_PER_DAY]);
                     
                     // Calculate weights based on datasets for this chunk (stationarity period)
                     calculate_weights_for_chunk(
@@ -308,14 +352,24 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     // This is done here despite potentially discarding result later if chunk is not in largest contiguous subset because
                     // we do not want to repeat I/O with hundreds of gigabytes of data. I.e. we already have the data in memory here.
                     debug_print!("calculating projections");
-                    let chunk_projections: DashMap<NonzeroElement, TimeSeries> = local_theory.calculate_projections(
-                        &local_hashmap_n,
-                        &local_hashmap_n,
-                        &local_wn,
-                        &local_we,
-                        &datasets
-                    );
-                    assert!(local_projections.insert(index, chunk_projections).is_none(), "A duplicate entry was made");
+                    let chunk_projections: DashMap<NonzeroElement, TimeSeries> = local_theory
+                        .calculate_projections(
+                            &local_hashmap_n,
+                            &local_hashmap_n,
+                            &local_wn,
+                            &local_we,
+                            &datasets
+                        );
+                    let chunk_auxiliary = local_theory
+                        .calculate_auxiliary_values(
+                            &local_hashmap_n,
+                            &local_hashmap_n,
+                            &local_wn,
+                            &local_we,
+                            &datasets
+                        );
+                    assert!(local_projections.insert(index, chunk_projections).is_none(), "A duplicate projection entry was made");
+                    assert!(local_auxiliary.insert(index, chunk_auxiliary).is_none(), "A duplicate auxiliary entry was made");
                     
                     // Add weights to dashmap
                     local_weights.n.insert(index,local_hashmap_n);
@@ -449,7 +503,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                         // let mut buffer_for_recieving: Vec<f32> = Vec::with_capacity(size); // This heap allocation is necessary, and ownership will be passed onto the dashmap
 
                         debug_print!("rank {} about to receive f32s", balancer.rank);
-                        let (buffer_for_recieving, status) = balancer.world
+                        let (buffer_for_recieving, _status) = balancer.world
                             .any_process()
                             .receive_vec::<f32>();
 
@@ -484,7 +538,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             println!("rank {}: longest contiguous subset of chunks begins at {starting_value} and has length {size} chunks", balancer.rank);
 
             // TODO: generalize to yearly
-            let secs_per_chunk = SECONDS_PER_DAY * days;
+            let secs_per_chunk = SECONDS_PER_DAY * days_per_chunk;
 
             let complete_series = Arc::new(DashMap::new());
             for element in &nonzero_elements {
@@ -528,10 +582,188 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             Arc::try_unwrap(complete_series).expect("An arc somehow survived")
         };
 
-        // [ ] Change station criteria so that series with at least one valid point are included
-        // [ ] Noise spectra is weighted by their degree of overlap with the total time series.
-        // Chuck all data prior to 2003
-        // Do coordinate transformation: linearly interpolate between the values in `IGRF_declinations_for_1sec.txt`. The values given are for the start of the 180th day of each year.
+        // Flatten all chunks over which this largest contiguous subset spans
+        // to get T::NONZERO_ELEMENTS number of large series. This essentially flattens
+        // `auxiliary` from DashMap<_, AuxiliaryValue> to Auxiliary value (i.e. the complete,
+        // stiched-together time series).
+        let start_second;
+        let auxiliary_complete: <T as Theory>::AuxiliaryValue = {
+
+            // First communicate about which nonzero chunks were obtained
+            let my_nonzero_chunks: Vec<Index> = auxiliary_values
+                .iter()
+                .fold(vec![], |mut v, pair| { v.push(*pair.key()); v});
+            let mut all_nonzero_chunks = my_nonzero_chunks.clone();
+            
+            let empty: Vec<usize> = vec![std::usize::MAX, std::usize::MAX, std::usize::MAX];
+
+            // Synchronize nonzero chunks for every rank
+            for rank in 0..balancer.size {
+
+                if rank == balancer.rank {
+
+                     // If it is your turn, broadcast to all ranks `send_to_rank` that are not yourself
+                    for send_to_rank in 0..balancer.size {
+
+                        if send_to_rank != rank {
+                            if my_nonzero_chunks.len() > 0 {
+                                debug_print!("rank {rank} about to send {} nonzero chunks {:?} to {send_to_rank}", my_nonzero_chunks.len(), &my_nonzero_chunks);
+                                balancer.world.process_at_rank(send_to_rank as i32).send(&my_nonzero_chunks);
+                            } else {
+                                // send empty
+                                debug_print!("rank {rank} about to send empty to {send_to_rank}");
+                                balancer.world.process_at_rank(send_to_rank as i32).send(&empty);
+                            }
+
+                        } 
+                    }
+        
+                } else {
+                    
+                    // If it is not your turn to broadcast, receive other_nonzero_chunks and append
+                    let (mut other_nonzero_chunks, status) = balancer.world
+                        .any_process()
+                        .receive_vec::<Index>();
+
+                    debug_print!("rank {} received from rank {}: {:?}", balancer.rank, status.source_rank(), &other_nonzero_chunks);
+
+                    if empty != other_nonzero_chunks {
+                        all_nonzero_chunks.append(&mut other_nonzero_chunks);
+                    }
+                }
+
+                // Barrier, for safety. Don't think we necessarily need it here and not after this scope
+                balancer.barrier();
+            }
+
+            // After receiving all nonzero chunks, sort. Now, all ranks should have this same vector.
+            all_nonzero_chunks.sort();
+
+            // Iterate through sorted chunk index array and send/receive chunks
+            for nonzero_chunk in all_nonzero_chunks {
+
+                if my_nonzero_chunks.contains(&nonzero_chunk) {
+
+                    // If you hold the data to this chunk, send it to other ranks
+                    
+                    // Get auxiliary values for this chunk and serialize
+                    let chunk_auxiliary: Vec<u8> = serde_cbor::to_vec(&*auxiliary_values.get(&nonzero_chunk).unwrap())
+                        .expect("failed to serialize serializable type");
+
+                    for send_to_rank in 0..balancer.size {
+
+                        if send_to_rank != balancer.rank {
+                            debug_print!("Rank {} about to send {} auxiliary bytes [{:?} .. ] for index {} to rank {}", balancer.rank, chunk_auxiliary.len(), &chunk_auxiliary[..3], nonzero_chunk, send_to_rank);
+
+                            balancer.world
+                                .process_at_rank(send_to_rank as i32)
+                                .send(&chunk_auxiliary); 
+                        }
+                    }
+
+                    // Wait for all other ranks to receive this nonzero element
+                    balancer.barrier();
+                } else {
+
+                    debug_print!("rank {} about to receive auxiliary f32s", balancer.rank);
+                    let (buffer_for_recieving, _status) = balancer.world
+                        .any_process()
+                        .receive_vec::<u8>();
+
+                    // Convert buffer into array
+                    let auxiliary_chunk_to_insert: <T as Theory>::AuxiliaryValue = serde_cbor::from_slice(&buffer_for_recieving)
+                        .expect("failed to deserialize deserializable auxilary value");
+                    
+                    // Wait for all other ranks to receive this nonzero element
+                    balancer.barrier();
+
+                    auxiliary_values.insert(nonzero_chunk, auxiliary_chunk_to_insert);
+                }
+            }
+
+            // Now that all ranks have all of the data, need to find longest contiguous subset of chunks
+            // This **should** be the same set as projections_complete but we will recompute and verify.
+            let (size, starting_value): (usize, usize) = {
+            
+                // To do this we first gather all chunks
+                let set: Vec<usize> = auxiliary_values
+                    .par_iter_mut()
+                    .map(|pair| *pair.key())
+                    .collect();
+
+                // Then, return largest contiguous subset
+                get_largest_contiguous_subset(&set)
+            };
+            println!("rank {}: longest contiguous subset of chunks of auxilary values begins at {starting_value} and has length {size} chunks", balancer.rank);
+            start_second = starting_value;
+
+            // TODO: generalize to yearly
+            let secs_per_chunk: usize = SECONDS_PER_DAY * days_per_chunk;
+
+            let complete_series = <T as Theory>::AuxiliaryValue::from_chunk_map(
+                &auxiliary_values,
+                secs_per_chunk,
+                starting_value,
+                size,
+            );
+            complete_series
+        };
+
+        // Calculating the projections and auxiliary values are the only reason 
+        // why we really needed multinode parallelism, since the dataset is almost 1 TB.
+        // We can finish the calculation with a single node, so save results to disk.
+        //
+        // First, open file. Then, save serialized bytes.
+        if balancer.rank == 0 {
+            let (mut projections_file, mut auxiliary_file) = futures::join!(
+                async { File::create("projections_complete").await.unwrap() },
+                async { File::create("auxiliary_complete").await.unwrap() }
+            );
+
+            // Wrap with some metadata
+            let projections_complete = ProjectionsComplete {
+                projections_complete,
+                start_second: start_second,
+                days: days.clone().unwrap_or(DATA_DAYS),
+            };
+
+            // Define futures for saving these to disk
+            let proj_future = async {
+                let proj_serialized: Vec<u8> = serde_cbor::to_vec(&projections_complete).expect("failed to serialize projections_complete");
+                projections_file
+                    .write_all(&proj_serialized)
+                    .await
+                    .expect("failed to write projections to disk");
+                println!("saved projections to disk");
+            };
+            let aux_future = async {
+                let aux_serialized: Vec<u8> = serde_cbor::to_vec(&auxiliary_complete).expect("failed to serialize projections_complete");
+                auxiliary_file
+                    .write_all(&aux_serialized)
+                    .await
+                    .expect("failed to write projections to disk");
+                println!("saved auxilary to disk");
+            };
+
+            // Save serialized bytes
+            futures::join!(proj_future, aux_future);
+        }
+
+        Ok(())
+    }
+
+
+    pub fn analysis(
+        stationarity: Stationarity,
+        projections_complete_struct: Arc<ProjectionsComplete>,
+        auxiliary_complete: Arc<<T as Theory>::AuxiliaryValue>,
+        theory: &T,
+        // balancer: &mut Manager<()>,
+    ) -> Result<(), Box<dyn Error>> {
+
+        // Retrieve series and days used from ProjectionsComplete
+        let projections_complete = &projections_complete_struct.projections_complete;
+        let days = projections_complete_struct.days.clone();
 
         // Calculate coherence_times: a vector containing the integer number of seconds for every
         // coherence time we are considering.
@@ -546,34 +778,43 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         let frequency_bins: Vec<FrequencyBin> = frequencies_from_coherence_times(&coherence_times);
 
         // Partition zipped(coherence_times, frequency_bins) over ranks
-        let local_set: Vec<(usize, FrequencyBin)> = balancer
-            .local_set(
-                &coherence_times
-                .iter()
-                .cloned()
-                .zip(frequency_bins)
-                .collect()
-            );
+        // let local_set: Vec<(usize, FrequencyBin)> = balancer
+        //     .local_set(
+        //         &coherence_times
+        //         .iter()
+        //         .cloned()
+        //         .zip(frequency_bins)
+        //         .collect()
+        //     );
+
+        let set =  coherence_times
+            .iter()
+            .cloned()
+            .zip(frequency_bins)
+            .collect();
 
         // Calculate data vector for this local set.
         let data_vector_dashmap = theory
-            .calculate_data_vector(&projections_complete, &local_set);
+            // .calculate_data_vector(&projections_complete, &local_set);
+            .calculate_data_vector(&projections_complete, &set);
+        println!("finished data vector");
+        
+            // Calculate the theory mean
+        let theory_mean = theory
+            // .calculate_mean_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
+            .calculate_mean_theory(&set, total_secs, coherence_times.len(), Arc::clone(&auxiliary_complete));
+        println!("finished mean");
 
-        // Calculate the mean theory
-        let mean_theory = theory
-            .calculate_mean_theory(&local_set, total_secs, coherence_times.len());
-    
-        // Unwrap data_vector and theory
-        let data_vector = Arc::try_unwrap(data_vector).expect("Somehow an Arc survived");
-        let theory = Arc::try_unwrap(theory).unwrap();
+        // Calculate the theory var
+        let theory_var = theory
+            // .calculate_var_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
+            .calculate_var_theory(&set, &projections_complete, coherence_times.len(), days, stationarity, auxiliary_complete);
+        println!("finished var");
+        
 
-        // Return Analysis
-        Arc::new(Analysis {
-            weights,
-            theory,
-            projections,
-            data_vector,
-        })
+        println!("{} {} {} elements", data_vector_dashmap.len(), theory_mean.len(), theory_var.len());
+
+        Ok(())
     }
 }
 
@@ -586,10 +827,29 @@ pub enum Stationarity {
     Daily(usize),
 }
 
+impl Stationarity {
+
+    /// This retrieves the start and end second index for the given year.
+    /// 
+    /// Note that these indices are relative to the first day there was data,
+    /// not the first day for any subset of data being used for the analysis.
+    pub fn get_year_indices(&self, year: usize) -> (usize, usize) {
+        
+        // First second of the year provided
+        let start = day_since_first(0, year) * 24 * 60 * 60;
+
+        // Last second of the year provided, calculated as
+        // first second of the next year minus one
+        let end = day_since_first(0, year+1) * 24 * 60 * 60 - 1;
+
+        (start, end)
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 pub enum Coherence {
-    Days(usize),
-    Seconds(usize),
+    Yearly,
+    Days(usize)
 }
 
 
@@ -806,7 +1066,7 @@ async fn calculate_weights_for_chunk(
 
 /// `starting_value` and `size` specify a range of integers.
 /// This function checks if `chunk` is in that range.
-fn in_longest_subset(chunk: usize, size: usize, starting_value: usize) -> bool {
+pub(crate) fn in_longest_subset(chunk: usize, size: usize, starting_value: usize) -> bool {
 
     (chunk >= starting_value)
     && (chunk < (starting_value + size))
