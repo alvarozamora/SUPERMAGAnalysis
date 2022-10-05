@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::collections::HashMap;
 use std::io::prelude::*;
+use std::ops::Range;
 use std::sync::Arc;
 use std::path::PathBuf;
 use anyhow::Result;
@@ -288,29 +289,33 @@ pub struct Chunk {
 pub struct DatasetLoader {
     pub coordinate_map: Arc<HashMap<StationName, Coordinates>>,
     pub semivalid_chunks: Arc<DashMap<Index, Vec<Chunk>>>,
-    days: usize,
-    chunk: usize,
+    days: Range<usize>,
+    chunk_size_in_days: usize,
+    // chunk: usize,
 }
 
 impl DatasetLoader {
 
     // This function gathers all metadata required for loading a chunk of data
-    pub fn new(days: usize) -> Self {
+    pub fn new(days: Option<Range<usize>>, coherence: Coherence) -> Self {
+
+        // Size of data chunks
+        let coherence_time_in_days = match coherence {
+            Coherence::Days(days) => days,
+            Coherence::Yearly => todo!(),
+        };
 
         // Construct coordinate map 
         let coordinate_map = Arc::new(construct_coordinate_map());
 
         // Find all stations for which there is data for this year
-        let semivalid_chunks = retrieve_chunks(days);
-
-        // Chunk initialized at zero
-        let chunk = 0;
+        let semivalid_chunks = retrieve_chunks(days.clone(), coherence_time_in_days);
 
         Self {
             coordinate_map,
             semivalid_chunks,
-            days,
-            chunk,
+            days: days.unwrap_or(DATA_DAYS),
+            chunk_size_in_days: coherence_time_in_days,
         }
 
     }
@@ -424,7 +429,10 @@ fn retrieve_stations(year: usize) -> Vec<String> {
     paths
 }
 
-fn retrieve_chunks(days: usize) -> Arc<DashMap<Index, Vec<Chunk>>> {
+fn retrieve_chunks(
+    days: Option<Range<usize>>,
+    chunk_size_in_days: usize
+) -> Arc<DashMap<Index, Vec<Chunk>>> {
 
     // Gather paths to all stations
     let stations: Vec<_> = glob("../stations/*").unwrap().map(|x| x.unwrap()).collect::<Vec<_>>();
@@ -435,9 +443,9 @@ fn retrieve_chunks(days: usize) -> Arc<DashMap<Index, Vec<Chunk>>> {
 
 
     // Iterate through every chunk of days
-    DATA_DAYS
-        .step_by(days)
-        .map(|x| (x..).take(days))
+    days.unwrap_or(DATA_DAYS)
+        .step_by(chunk_size_in_days)
+        .map(|x| (x..).take(chunk_size_in_days))
         .collect::<Vec<_>>()
         .into_par_iter()
         .enumerate()
@@ -509,7 +517,7 @@ fn validate_buffer_size(buffer: &[u8], expected_size: usize, year: usize) -> Res
 
 
 /// This is a recursive function that returns the number of days since the first day there was data.
-pub(crate) fn day_since_first(day: usize, year: usize) -> usize {
+pub fn day_since_first(day: usize, year: usize) -> usize {
 
     match year {
         1998 => day,
