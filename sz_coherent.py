@@ -86,7 +86,7 @@ for n in range(cohTs):
     # Calculate the cis
     cis = np.cos(2 * math.pi * (pad(n) / cohT[n] - fd * 60) * np.arange(N)) + 1j * np.sin(2 * math.pi * (pad(n) / cohT[n] - fd * 60) * np.arange(N))
 
-    # Auxilary trigonometric values
+    # Auxiliary trigonometric values
     cosfd = np.cos(2 * math.pi * fd * 60 * np.arange(N))
     sinfd = np.sin(2 * math.pi * fd * 60 * np.arange(N))
     cospad = np.cos(2 * math.pi * pad(n) / cohT[n] * np.arange(N))
@@ -168,22 +168,35 @@ del signal
 print(str(time.time() - t0) + ' ' + str(process.memory_info().rss))
 
 def compute_power(year):
+
+    # Get the beginning and end of the chunks of a year
     start = (365 * year + math.floor((year + (skipyears + 1) % 4) / 4)) * 24 * 60
     end = (365 * (year + 1) + math.floor((year + 1 + (skipyears + 1) % 4) / 4)) * 24 * 60
     subseries = timeseries[:,start:end]
+
+    # Initialize empty array for power spectrum
     power = np.zeros((5, 5, 2 * uptime), dtype = complex)
+
+    # Get chunk indices
     num_chunks = math.floor((end - start + downtime) / (uptime + downtime))
     chunksize = math.floor((end - start + downtime) / num_chunks) - downtime
     chunkmod = (end - start + downtime) % num_chunks
     chunks = [[k * (chunksize + downtime) + min(k, chunkmod), k * (chunksize + downtime) + min(k + 1, chunkmod) + chunksize] for k in range(num_chunks)]
+
     for chunk in chunks:
+        # Get the data for this chunk and pad it to have length equal to a power of 2
         sample = np.append(subseries[:,chunk[0]:chunk[1]], np.zeros((5, 2 * uptime + chunk[0] - chunk[1])), axis = 1)
+        # Count nans (not necessary if data is a large contiguous subset with no null entries)
         nancount = np.count_nonzero(np.logical_and(nans >= chunk[0] + start, nans < chunk[1] + start))
         if nancount != chunk[1] - chunk[0]:
+            # Take fft of the padded chunk
             fft = np.fft.fft(sample)
+            # add to power: 2 * |fft|^2 / time
             power += 2 * fft[:,None] * np.conj(fft[None]) / (60 * (chunk[1] - chunk[0] - nancount))
         else:
             num_chunks -= 1
+
+    # Take the average
     power = power / num_chunks
     return(power)
 
