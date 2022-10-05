@@ -8,7 +8,7 @@ use futures::stream::FuturesOrdered;
 use std::pin::Pin;
 
 /// This struct helps manage compute on a given node and across nodes
-pub struct Balancer<T> {
+pub struct Balancer<T = ()> {
     pub manager: Manager<T>,
     pub runtime: Runtime,
 }
@@ -21,30 +21,34 @@ pub struct Manager<T> {
     pub size: usize,
     tasks: Vec<Box<dyn Future<Output=T>>>,
     done: bool,
+    /// Size of Futures Buffer (per worker)
     buffer: usize,
 }
 
 impl<T> Balancer<T> {
 
-    /// Constructs a new `Balancer` after initializing mpi
-    pub fn new(async_tasks: usize, buffer: usize) -> Self {
+    /// Constructs a new `Balancer` after initializing mpi.
+    pub fn new(parallel_async_tasks: usize, buffer: usize) -> Self {
 
         // Initialize mpi
-        let universe = mpi::initialize().unwrap();
+        let universe = mpi::initialize()
+            .expect("Failed to initialize mpi");
         let world = universe.world();
 
         // This is the maximum number of `JoinHandle`s allowed.
         // Set equal to available_parallelism minus reduce (user input)
-        let max_available_threads = std::thread::available_parallelism().unwrap().get();
-        let workers: usize = if async_tasks > max_available_threads {
+        let max_available_threads = std::thread::available_parallelism()
+            .expect("failed to retrieve number of threads on this system")
+            .get();
+        let workers: usize = if parallel_async_tasks > max_available_threads {
 
-            println!("async_tasks provided ({async_tasks}) exceeds max_available_threads");
+            println!("parallel_async_tasks provided ({parallel_async_tasks}) exceeds max_available_threads");
             println!("defaulting to max_available_threads");
 
             max_available_threads
         } else {
 
-            async_tasks
+            parallel_async_tasks
         };
 
         // Initialize tokio runtime
@@ -53,8 +57,6 @@ impl<T> Balancer<T> {
             .enable_all()
             .build()
             .unwrap();
-
-
 
         // This is the node id and total number of nodes
         let rank: usize = world.rank() as usize;
@@ -89,50 +91,27 @@ impl<T> Manager<T> {
     pub fn local_set<I: Clone>(&mut self, items: &Vec<I>) -> Vec<I> {
 
         // Gather and return local set of items
-        let mut _local_sets = items
+        let mut local_sets = items
             .chunks(div_ceil(items.len(), self.size));
 
-        // Warn user if displacements isn't empty
-        // if !self.displacements.is_empty() {
-        //     println!("Balancer Warning: displacements is not empty.");
-        //     println!("You may have not awaited a previous local_set.")
-        // }
-
-        // // Calculate counts
-        // self.counts = _local_sets
-        //     .clone() // clones &[T] not [T]
-        //     .map(|set| set.len())
-        //     .collect::<Vec<usize>>();
-        
-        // // Calculate displacement with counts.
-        // // TODO: assumes fixed size. Implement method for counts not known at compile time.
-        // self.displacements = self.counts
-        //     .iter()
-        //     .scan(0, |acc, &x| {
-        //         let tmp = *acc;
-        //         *acc += x;
-        //         Some(tmp)
-        //     })
-        //     .collect();
-
         // Return nth local set
-        _local_sets
+        local_sets
             .nth(self.rank)
             .unwrap()
             .to_vec()
     }
 
     /// Adds a handle
-    pub fn task(&mut self, fut: Box<dyn Future<Output=T>>){
+    pub fn task(&mut self, fut: Box<dyn Future<Output=T>>) {
         self.done = false;
         self.tasks.push(fut);
     }
 
-    // /// Adds a set of handles
-    // pub fn tasks(&mut self, mut fut: Vec<Box<dyn Future<Output=T>>>){
-    //     self.done = false;
-    //     self.tasks.append(&mut fut);
-    // }
+    /// Adds a set of handles
+    pub fn tasks(&mut self, mut fut: Vec<Box<dyn Future<Output=T>>>){
+        self.done = false;
+        self.tasks.append(&mut fut);
+    }
 
     /// Buffered awaits all futures on current node without waiting for other nodes. (Use in conjunction with [`barrier`] for blocking across all ranks).
     /// 
@@ -145,10 +124,10 @@ impl<T> Manager<T> {
         // Pin then execute futures
         let result: Vec<T> = futures::stream::iter(
             self
-            .tasks
-            .drain(..)
-            .map(|fut| Pin::from(fut))
-        )
+                .tasks
+                .drain(..)
+                .map(|fut| Pin::from(fut))
+            )
             .buffered(self.size * self.buffer)
             .collect::<Vec<_>>()
             .await;
