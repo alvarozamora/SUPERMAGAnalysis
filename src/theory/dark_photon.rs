@@ -1122,13 +1122,15 @@ impl Theory for DarkPhoton {
                                         power_end
                                     );
 
-                                    // Add contribution to chunk
-                                    inner_chunk_map
-                                        .entry(element_pair.clone())
-                                        .and_modify(|p| {
-                                            p.add_assign(&power.mul_scalar(overlap as f32).power)
-                                        })
-                                        .or_insert(Power { power: power.mul_scalar(overlap as f32).power, start_sec: chunk_start, end_sec: chunk_end });
+                                    // Add contribution to chunk if there is overlap
+                                    if overlap > 0 {
+                                        inner_chunk_map
+                                            .entry(element_pair.clone())
+                                            .and_modify(|p| {
+                                                p.add_assign(&power.mul_scalar(overlap as f32).power)
+                                            })
+                                            .or_insert(Power { power: power.mul_scalar(overlap as f32).power, start_sec: chunk_start, end_sec: chunk_end });
+                                    }
                             });
                         });
                 }
