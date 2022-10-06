@@ -1095,6 +1095,7 @@ impl Theory for DarkPhoton {
                         .min(len_data);
                     log::trace!("calculated start and end indices");
 
+                    // Check all spectra for any overlap
                     spectra
                         .iter()
                         .for_each(|kv| {
@@ -1134,6 +1135,7 @@ impl Theory for DarkPhoton {
                             });
                         });
                 }
+                // Insert inner chunk containing this coherence time's power spectrum
                 result
                     .insert(*coherence_time, inner_chunk_map);
             });
