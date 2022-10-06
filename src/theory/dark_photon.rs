@@ -13,8 +13,8 @@ use crate::{utils::{
 use std::ops::{Mul, Div, Add};
 use ndrustfft::{FftHandler, ndfft};
 use rayon::prelude::*;
-use ndarray::{s, ArrayView1};
-use num_traits::ToPrimitive;
+use ndarray::{s, ArrayView1, ScalarOperand};
+use num_traits::{ToPrimitive, Float, Num};
 use ndrustfft::Complex;
 use std::f64::consts::PI;
 use std::f32::consts::PI as SINGLE_PI;
@@ -127,7 +127,7 @@ impl Theory for DarkPhoton {
 
     type AuxiliaryValue = DarkPhotonAuxiliary;
     type Mu = DarkPhotonMu;
-    type Var = DashMap<(NonzeroElement, NonzeroElement), Array1<Complex<f32>>>;
+    type Var = DashMap<(NonzeroElement, NonzeroElement), Power<f32>>;
 
     fn get_nonzero_elements() -> HashSet<NonzeroElement> {
 
@@ -204,7 +204,7 @@ impl Theory for DarkPhoton {
                     (station_name.clone(), relevant_product)
                 })
                 .collect::<HashMap<StationName, TimeSeries>>()
-                .iter()
+                .into_iter()
                 .fold(TimeSeries::default(size), |acc, (_key, series)| acc.add(series));
 
             // Insert combined time series for this nonzero element for this chunk, ensuring no duplicate entry
@@ -230,7 +230,7 @@ impl Theory for DarkPhoton {
 
     fn calculate_data_vector(
         &self,
-        projections_complete: &DashMap<NonzeroElement, TimeSeries>,
+        projections_complete: &ProjectionsComplete,
         local_set: &Vec<(usize, FrequencyBin)>,
     ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> {
 
@@ -246,6 +246,7 @@ impl Theory for DarkPhoton {
 
                 // Parallelize over all nonzero elements in the theory
                 projections_complete
+                    .projections_complete
                     .par_iter()
                     .for_each_with(&inner_dashmap, |inner_map, series| {
                         
@@ -312,7 +313,7 @@ impl Theory for DarkPhoton {
     /// 
     fn calculate_mean_theory(
         &self,
-        local_set: &Vec<(usize, FrequencyBin)>,
+        set: &Vec<(usize, FrequencyBin)>,
         len_data: usize,
         coherence_times: usize,
         auxiliary_values: Arc<Self::AuxiliaryValue>,
@@ -326,46 +327,14 @@ impl Theory for DarkPhoton {
         // Second key is chunk time
         let result = DashMap::with_capacity(coherence_times);
 
-        local_set
-            .par_iter()
+        log::trace!("starting loop for {} coherence times", set.len());
+        set
+            .into_par_iter()
             .for_each(|(coherence_time /* usize */, frequency_bin /* &FrequencyBin */)| {
 
                 // For the processed, cleaned dataset, this is 
                 // the number of chunks for this coherence time
                 let num_chunks = len_data / coherence_time;
-
-                // Calculate cos + isin. Unlike the original implementation, this is done using euler's 
-                // exp(ix) = cos(x) + i sin(x)
-                //
-                // Note: when you encounter a chunk that has total time < coherence time, the s![start..end] below will truncate it.
-                let cis_fh_f = Array1::range(0.0, *coherence_time as f32, 1.0)
-                    .map(|x| Complex { re: *x, im: 0.0 })
-                    .mul(
-                        Complex {
-                            re: 0.0, 
-                            im: 2.0 * SINGLE_PI * ((approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed") - FD as f32),
-                        }
-                    )
-                    .mapv(Complex::exp);
-                let cis_f = Array1::range(0.0, *coherence_time as f32, 1.0)
-                    .map(|x| Complex { re: *x, im: 0.0 })
-                    .mul(
-                        Complex {
-                            re: 0.0, 
-                            im: 2.0 * SINGLE_PI * FD as f32,
-                        }
-                    )
-                    .mapv(Complex::exp);
-                let cis_f_fh = Array1::range(0.0, *coherence_time as f32, 1.0)
-                    .map(|x| Complex { re: *x, im: 0.0 })
-                    .mul(
-                        Complex {
-                            re: 0.0, 
-                            // This minus sign flips (fdhat-fd) --> (fd-fdhat)
-                            im: -2.0 * SINGLE_PI * ((approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed") - FD as f32),
-                        }
-                    )
-                    .mapv(Complex::exp);
                 
                 // TODO: refactor elsewhere to be user input or part of some fit
                 const RHO: f32 = 6.04e7;
@@ -377,10 +346,54 @@ impl Theory for DarkPhoton {
 
                 for chunk in 0..num_chunks {
 
-                    // Begining and end index for this chunk in the total series
+                    // Beginning and end index for this chunk in the total series
+                    // NOTE: `end` is exclusive
                     let start: usize  = chunk * coherence_time;
                     let end: usize = ((chunk + 1) * coherence_time).min(len_data);
+                    log::trace!("calculated start and end indices");
 
+                    // Calculate cos + isin. Unlike the original implementation, this is done using euler's 
+                    // exp(ix) = cos(x) + i sin(x)
+                    //
+                    // Note: when you encounter a chunk that has total time < coherence time, the s![start..end] below will truncate it.
+                    // TODO: check phase
+                    // TODO: check f32 precision
+                    // let cis_fh_f = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    let cis_fh_f = (start..end)
+                        .map(|x| Complex { re: x as f32, im: 0.0 })
+                        .collect::<Array1<Complex<f32>>>()
+                        .mul(
+                            Complex {
+                                re: 0.0, 
+                                im: 2.0 * SINGLE_PI * ((approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed") - FD as f32),
+                            }
+                        )
+                        .mapv(Complex::exp);
+                    // let cis_f = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    let cis_f = (start..end)
+                        .map(|x| Complex { re: x as f32, im: 0.0 })
+                        .collect::<Array1<Complex<f32>>>()
+                        .mul(
+                            Complex {
+                                re: 0.0, 
+                                im: 2.0 * SINGLE_PI * FD as f32,
+                            }
+                        )
+                        .mapv(Complex::exp);
+                    // let cis_f_fh = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    let cis_f_fh = (start..end)
+                        .map(|x| Complex { re: x as f32, im: 0.0 })
+                        .collect::<Array1<Complex<f32>>>()
+                        .mul(
+                            Complex {
+                                re: 0.0, 
+                                // This minus sign flips (fdhat-fd) --> (fd-fdhat)
+                                im: -2.0 * SINGLE_PI * ((approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed") - FD as f32),
+                            }
+                        )
+                        .mapv(Complex::exp);
+                    log::trace!("calculated cis, which have length {}", cis_fh_f.len());
+                    
                     // Get references to auxiliary values for this chunk for better readability
                     let h1 = auxiliary_values.h[0].slice(s![start..end]);
                     let h2 = auxiliary_values.h[1].slice(s![start..end]);
@@ -389,17 +402,17 @@ impl Theory for DarkPhoton {
                     let h5 = auxiliary_values.h[4].slice(s![start..end]);
                     let h6 = auxiliary_values.h[5].slice(s![start..end]);
                     let h7 = auxiliary_values.h[6].slice(s![start..end]);
+                    log::trace!("obtained auxiliary values for chunk {chunk}, which have length {}", h1.len());
 
                     // Start of f = fd-fdhat components
 
                     // mux0 is FT of (1 - H1 + iH2) at f=fd-fdhat
                     let mux0 = (&cis_f_fh)
-                        .mul(Complex::<f32>::new(1.0, 0.0)
-                            .add(h1
-                                .iter()
-                                .zip(h2)
-                                .map(|(&h1_, &h2_)| Complex::new(-h1_, h2_))
-                                .collect::<Array1<_>>()))
+                        .mul(h1
+                            .iter()
+                            .zip(h2)
+                            .map(|(&h1_, &h2_)| Complex::new(1.0 - h1_, h2_))
+                            .collect::<Array1<_>>())
                         .mul(mux_prefactor)
                         .sum();
 
@@ -833,12 +846,17 @@ impl Theory for DarkPhoton {
                     
                     // muz 2, 3, 4 are all at f = -fdhat
                     let fdhat = (approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed");
-                    let cis_mfh = Array1::range(0.0, *coherence_time as f32, 1.0)
-                        .map(|x| Complex::new(*x, 0.0))
+                    // TODO: check phase
+                    // let cis_mfh = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    let cis_mfh = (start..end)
+                        .map(|x| Complex { re: x as f32, im: 0.0 })
+                        .collect::<Array1<Complex<f32>>>()
                         .mul(Complex::new(0.0, 2.0 * SINGLE_PI * -fdhat))
                         .mapv(Complex::exp);
-                    let cis_fh = Array1::range(0.0, *coherence_time as f32, 1.0)
-                        .map(|x| Complex::new(*x, 0.0))
+                    // let cis_fh = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    let cis_fh = (start..end)
+                        .map(|x| Complex { re: x as f32, im: 0.0 })
+                        .collect::<Array1<Complex<f32>>>()
                         .mul(Complex::new(0.0, 2.0 * SINGLE_PI * fdhat))
                         .mapv(Complex::exp);
 
@@ -869,6 +887,7 @@ impl Theory for DarkPhoton {
                         y: [muy0, muy1, muy2, muy3, muy4, muy5, muy6, muy7, muy8, muy9, muy10, muy11, muy12, muy13, muy14],
                         z: [muz0, muz1, muz2, muz3, muz4, muz5, muz6, muz7, muz8, muz9, muz10, muz11, muz12, muz13, muz14],
                     };
+                    log::trace!("calculated mus for chunk {chunk}");
 
                     // Insert chunk mu into chunk map
                     inner_chunk_map.insert(
@@ -890,7 +909,7 @@ impl Theory for DarkPhoton {
     fn calculate_var_theory(
         &self,
         set: &Vec<(usize, FrequencyBin)>,
-        projections_complete: &DashMap<NonzeroElement, TimeSeries>,
+        projections_complete: &ProjectionsComplete,
         coherence_times: usize,
         days: Range<usize>,
         stationarity: Stationarity,
@@ -907,9 +926,7 @@ impl Theory for DarkPhoton {
 
         // for year in 2004..2020 {
         // NOTE: This is hardcoded for stationarity = 1 year
-        // TODO: make parallel again
-        // (2004..2020).into_par_iter().for_each(|year| {
-        (2004..2020).into_iter().for_each(|year| {
+        (2004..2020).into_par_iter().for_each(|year| {
 
             // Get stationarity period indices (place within entire SUPERMAG dataset)
             // NOTE: this definition varies from original implementation. The original
@@ -919,7 +936,8 @@ impl Theory for DarkPhoton {
             let (start, end) = stationarity.get_year_indices(year);
             
             // Now convert these indices to the indices within the subset used
-            let secs = (days.start * 24 * 60 * 60)..(days.end * 24 * 60 * 60);
+            // let secs = (days.start * 24 * 60 * 60)..(days.end * 24 * 60 * 60);
+            let secs = projections_complete.secs();
             let (start, end) = (
                 secs.clone().position(|i| i == start).expect("sec index is out of bounds"), 
                 secs.clone().position(|i| i == end).expect("sec index is out of bounds"),
@@ -942,22 +960,22 @@ impl Theory for DarkPhoton {
             let num_chunks: usize = ((end - start + 1) / TAU).max(1);
             let chunk_size: usize = (end - start + 1) / num_chunks;
             let chunk_mod: usize = (end - start + 1) % num_chunks;
-            let chunks: Vec<[usize; 2]> = (0..num_chunks)
+            let stationarity_chunks: Vec<[usize; 2]> = (0..num_chunks)
                 .map(|k| {
                     [k * (chunk_size + downtime) + k.min(chunk_mod), k * (chunk_size + downtime) + (k + 1).min(chunk_mod) + chunk_size]
                 }).collect_vec();
-            dbg!(&chunks);
+            dbg!(&stationarity_chunks);
 
             // Set up an fft planner to reuse for all ffts in this year
             let mut planner = FftPlanner::new();
             let fft_handler = planner.plan_fft_forward(2*TAU);
             let mut scratch = vec![0.0.into(); 2*TAU];
         
-            let mut chunk_collection = Vec::with_capacity(chunks.len());
-            for chunk in chunks {
+            let mut chunk_collection = Vec::with_capacity(stationarity_chunks.len());
+            for stationarity_chunk in &stationarity_chunks {
 
                 // Get the data for this chunk, pad it to have length equal to a power of 2, and take its fft
-                let chunk_ffts: Vec<(NonzeroElement, Array1<Complex<f32>>)> = projections_subset
+                let chunk_ffts: Vec<(NonzeroElement, Power<f32>)> = projections_subset
                     .iter()
                     .map(|kv| {
 
@@ -966,11 +984,11 @@ impl Theory for DarkPhoton {
 
                         // Get chunk from year
                         println!("getting chunk from year");
-                        let chunk_from_year = &year_series[chunk[0]..chunk[1]];
+                        let chunk_from_year = &year_series[stationarity_chunk[0]..stationarity_chunk[1]];
                         println!("got chunk from year");
 
                         // Padded series
-                        let chunk_size = chunk[1] - chunk[0];
+                        let chunk_size = stationarity_chunk[1] - stationarity_chunk[0];
                         let mut padded_series = Array1::<Complex<f32>>::zeros(2*TAU);
                         println!(
                             "size of chunk is {}, being placed in a {} series of zeros",
@@ -989,19 +1007,29 @@ impl Theory for DarkPhoton {
                         // FFT of padded series
                         fft_handler
                             .process_with_scratch(padded_series.as_slice_mut().expect("should be in contiguous order"), &mut scratch);
-                            
-                        (element.clone(), padded_series)
+
+                        // Package power with metadata
+                        let power = Power {
+                            power: padded_series,
+                            start_sec: start,
+                            end_sec: end,
+                        };
+
+                        (element.clone(), power)
                     }).collect();
 
                 // Initialize dashmap for correlation
-                let chunk_ffts_squared: DashMap<(NonzeroElement, NonzeroElement), Array1<Complex<f32>>> = DashMap::new();
+                let chunk_ffts_squared: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DashMap::new();
                 let nancount = 0;
                 for (e1, fft1) in chunk_ffts.iter() {
                     for (e2, fft2) in chunk_ffts.iter() {
                         chunk_ffts_squared.insert(
                             (e1.clone(), e2.clone()),
-                             // TODO: verify formula
-                             (fft1 * fft2.map(Complex::conj)).mul(2.0) / ( /* original had 60* */ (chunk[1] - chunk[0] - nancount)) as f32
+                             // NOTE: in this scope, fft1 and fft2 should have the same start/end
+                             // so its okay to use fft2.power and discard start/end and inherit
+                             // start/end from fft1
+                             (fft1.mul(&fft2.power.map(Complex::conj)))
+                                .mul_scalar(2.0 / (/* original had 60* */ (stationarity_chunk[1] - stationarity_chunk[0] - nancount) as f32))
                         );
                     }
                 }
@@ -1011,30 +1039,30 @@ impl Theory for DarkPhoton {
 
             // Take the average. 
             // First, initialize zero arrays 
-            let avg_power: DashMap<(NonzeroElement, NonzeroElement), Array1<Complex<f32>>> = DARK_PHOTON_NONZERO_ELEMENTS
+            let avg_power: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DARK_PHOTON_NONZERO_ELEMENTS
                 .iter()
-                .combinations(2)
-                .map(|elements| ((elements[0].clone(), elements[1].clone()), Array1::zeros(2*TAU)))
+                .cartesian_product(DARK_PHOTON_NONZERO_ELEMENTS.iter())
+                .map(|(e1, e2)| ((e1.clone(), e2.clone()), Power { power: Array1::zeros(2*TAU), start_sec: start, end_sec: end }))
                 .collect();
-            // Then, sum
+            // Then, sum (get denominator before consuming iterator)
             let denominator = chunk_collection.len() as f32;
             chunk_collection
                 .into_iter()
                 .for_each(|chunk| {
                     chunk
                         .into_iter()
-                        .for_each(|(element, power)| {
+                        .for_each(|(element_pair, power)| {
                             avg_power
-                                .get_mut(&element)
-                                .expect("nonzero element should exist")
-                                .add_assign(&power);
+                                .get_mut(&element_pair)
+                                .expect("nonzero element_pair should exist")
+                                .add_assign(&power.power);
                         })
                 });
 
             // Finally, divide
             avg_power
                 .iter_mut()
-                .for_each(|mut kv| kv.value_mut().div_assign(denominator * ONE));
+                .for_each(|mut kv| kv.value_mut().div_assign_scalar(denominator * ONE));
 
             
             // Add along with the rest of the stationarity times
@@ -1042,11 +1070,77 @@ impl Theory for DarkPhoton {
             
         });
         
-        spectra
+        // TODO stitch spectra together according to coherence times
+        let result = DashMap::with_capacity(coherence_times);
+        set
+            .into_iter()
+            .for_each(|(coherence_time, frequency_bin)| {
+
+                // First get the domain for the data used
+                let secs = projections_complete.secs();
+                let len_data = secs.len();
+
+                // Then, get each of the coherence chunks
+                let num_chunks = len_data / coherence_time;
+                
+                // This is the inner chunk map from chunk to coherence time
+                let inner_chunk_map: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DashMap::new();
+
+                for chunk in 0..num_chunks {
+
+                    // Beginning and end index for this chunk in the total series
+                    // NOTE: `end` is exclusive
+                    let chunk_start: usize  = chunk * coherence_time;
+                    let chunk_end: usize = ((chunk + 1) * coherence_time)
+                        .min(len_data);
+                    log::trace!("calculated start and end indices");
+
+                    spectra
+                        .iter()
+                        .for_each(|kv| {
+
+                            // Only need power from key value pair
+                            let power_map = kv.value();
+
+                            power_map
+                                .into_iter()
+                                .for_each(|kv_inner| {
+
+                                    // Get element pair and corresponding power
+                                    let (element_pair, power) = kv_inner.pair();
+
+                                    // Get start and end seconds for this power
+                                    let (power_start, power_end) = (power.start_sec, power.start_sec);
+
+                                    // Calculate overlap (in number of seconds)
+                                    // TODO: verify that these two ends are both inclusive ends,
+                                    //       as that is what the function assumes.
+                                    let overlap: usize = calculate_overlap(
+                                        chunk_start,
+                                        chunk_end,
+                                        power_start,
+                                        power_end
+                                    );
+
+                                    // Add contribution to chunk
+                                    inner_chunk_map
+                                        .entry(element_pair.clone())
+                                        .and_modify(|p| {
+                                            p.add_assign(&power.mul_scalar(overlap as f32).power)
+                                        })
+                                        .or_insert(Power { power: power.mul_scalar(overlap as f32).power, start_sec: chunk_start, end_sec: chunk_end });
+                            });
+                        });
+                }
+                result
+                    .insert(*coherence_time, inner_chunk_map);
+            });
+
+        result
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct DarkPhotonMu {
     // #[serde(with = "ComplexDef")]
     pub x: [Complex<f32>; 15],
@@ -1054,6 +1148,18 @@ pub struct DarkPhotonMu {
     pub y: [Complex<f32>; 15],
     // #[serde(with = "ComplexDef")]
     pub z: [Complex<f32>; 15],
+}
+
+/// Assumes these are inclusive indices!
+fn calculate_overlap(
+    start1: usize,
+    end1: usize,
+    start2: usize,
+    end2: usize
+) -> usize {
+    start1.max(start2)
+        .checked_sub(end1.min(end2) + 1)
+        .unwrap_or(0)
 }
 
 // #[derive(Serialize, Deserialize)]
@@ -1064,35 +1170,33 @@ pub struct DarkPhotonMu {
 //     im: T,
 // }
 
-impl serde::Serialize for DarkPhotonMu {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        (
-            &self.x.map(|x| (x.re, x.im)),
-            &self.y.map(|y| (y.re, y.im)),
-            &self.z.map(|z| (z.re, z.im)),
+// impl serde::Serialize for DarkPhotonMu {
+//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+//     where
+//         S: serde::Serializer,
+//     {
+//         (
+//             &self.x.map(|x| (x.re, x.im)),
+//             &self.y.map(|y| (y.re, y.im)),
+//             &self.z.map(|z| (z.re, z.im)),
         
-        ).serialize(serializer)
-    }
-}
+//         ).serialize(serializer)
+//     }
+// }
 
-impl<'de> serde::Deserialize<'de> for DarkPhotonMu {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let (x, y, z): ([(f32, f32); 15], [(f32, f32); 15], [(f32, f32); 15]) = serde::Deserialize::deserialize(deserializer)?;
-        Ok(DarkPhotonMu { 
-            x: x.map(|(re, im)| Complex::new(re, im)),
-            y: y.map(|(re, im)| Complex::new(re, im)),
-            z: z.map(|(re, im)| Complex::new(re, im)),
-        })
-    }
-}
-
-
+// impl<'de> serde::Deserialize<'de> for DarkPhotonMu {
+//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+//     where
+//         D: serde::Deserializer<'de>,
+//     {
+//         let (x, y, z): ([(f32, f32); 15], [(f32, f32); 15], [(f32, f32); 15]) = serde::Deserialize::deserialize(deserializer)?;
+//         Ok(DarkPhotonMu { 
+//             x: x.map(|(re, im)| Complex::new(re, im)),
+//             y: y.map(|(re, im)| Complex::new(re, im)),
+//             z: z.map(|(re, im)| Complex::new(re, im)),
+//         })
+//     }
+// }
 
 
 /// This function takes in the weights w_i along with the station coordinates and calculates H_i(t)
@@ -1178,6 +1282,66 @@ fn calculate_auxiliary_values(
     auxiliary_values
 }
 
+#[derive(Serialize, Deserialize)]
+pub struct Power<T: Num + Clone> {
+    power: Array1<Complex<T>>,
+    start_sec: usize,
+    end_sec: usize,
+}
+
+impl<T: Float> Power<T> {
+    pub fn map<'a, B, F>(&'a self, f: F) -> Power<T>
+    where
+        F: FnMut(&'a Complex<T>) -> Complex<T>,
+        T: 'a,
+    {
+        Power {
+            power: self.power.map(f),
+            ..*self
+        }
+    }
+    pub fn mul<'a>(&'a self, rhs: &Array1<Complex<T>>) -> Power<T> {
+        Power {
+            power: (&self.power).mul(rhs),
+            ..*self
+        }
+    }
+    pub fn add<'a>(&'a self, rhs: &Array1<Complex<T>>) -> Power<T> {
+        Power {
+            power: (&self.power).add(rhs),
+            ..*self
+        }
+    }
+    /// NOTE: these assign operations are not optimal. Perhaps a future TODO.
+    pub fn add_assign<'a>(&'a mut self, rhs: &Array1<Complex<T>>) {
+        self.power = (&self.power).add(rhs);
+    }
+    pub fn add_assign_scalar<'a, S>(&'a mut self, rhs: S)
+    where
+        S: Into<Complex<T>> + Copy,
+    {
+        self.power = (&self.power).map(|x| x + rhs.into());
+    }
+    pub fn div_assign<'a>(&'a mut self, rhs: &Array1<Complex<T>>) {
+        self.power = (&self.power).div(rhs);
+    }
+    pub fn div_assign_scalar<'a, S>(&'a mut self, rhs: S)
+    where
+        S: Into<Complex<T>> + Copy
+    {
+        self.power = (&self.power).map(|x| x / rhs.into());
+    }
+    pub fn mul_scalar<'a, S: ScalarOperand>(&'a self, rhs: S) -> Power<T>
+    where
+        T: Mul<S, Output=T>,
+        Complex<T>: Mul<S, Output=Complex<T>>,
+    {
+        Power {
+            power: (&self.power).mul(rhs),
+            ..*self
+        }
+    }
+}
 
 /// This calculates the fft of a tophat function starting at t=0 and going to t=T, 
 /// the length of the longest contiguous subset of the dataset Xi(t). 

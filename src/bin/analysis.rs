@@ -7,8 +7,10 @@ use std::sync::Arc;
 
 fn main() {
 
-    env_logger::init();
-    
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Debug)
+        .init();
+
     // Define stationarity time, Coherence time 
     const STATIONARITY_TIME: Stationarity = Stationarity::Daily(1);
 

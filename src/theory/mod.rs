@@ -14,7 +14,7 @@ use std::ops::Range;
 use num_complex::Complex;
 use ndarray::Array1;
 use special::Gamma;
-use crate::weights::Stationarity;
+use crate::weights::{Stationarity, ProjectionsComplete};
 use crate::{
     utils::{
         coordinates::construct_coordinate_map,
@@ -97,7 +97,7 @@ pub trait Theory: Send + Debug {
     /// TODO: Change the return type to be an associated type for the theory.
     fn calculate_data_vector(
         &self,
-        projections_complete: &DashMap<NonzeroElement, TimeSeries>,
+        projections_complete: &ProjectionsComplete,
         local_set: &Vec<(usize, FrequencyBin)>
     ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>)>>>;
 
@@ -116,7 +116,7 @@ pub trait Theory: Send + Debug {
     fn calculate_var_theory(
         &self,
         local_set: &Vec<(usize, FrequencyBin)>,
-        projections_complete: &DashMap<NonzeroElement, TimeSeries>,
+        projections_complete: &ProjectionsComplete,
         coherence_times: usize,
         days: Range<usize>,
         stationarity: Stationarity,

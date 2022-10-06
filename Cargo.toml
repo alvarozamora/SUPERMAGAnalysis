@@ -13,7 +13,7 @@ rayon = []
 csv = "1.1.6"
 serde = "1.0.137" 
 serde_derive = "1.0.137"
-ndarray = { version = "0.15.4", features = ["rayon", "serde"] }
+ndarray = { version = "0.15.6", features = ["rayon", "serde"] }
 ndarray-npy = "0.8.1"
 anyhow = "1.0.57"
 glob = "0.3.0"

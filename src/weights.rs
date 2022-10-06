@@ -11,7 +11,7 @@ use ndarray::{s, Array1, arr1, ArrayViewMut, Array2};
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
 use tokio::{fs::File, io::AsyncWriteExt};
-use std::{sync::Arc, ops::RangeInclusive, error::Error, marker::PhantomData};
+use std::{sync::Arc, ops::{RangeInclusive, Add}, error::Error, marker::PhantomData};
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::ops::AddAssign;
@@ -94,8 +94,13 @@ impl ProjectionsComplete {
     pub fn iter(&self) -> Iter<NonzeroElement, TimeSeries> {
         self.projections_complete.iter()
     }
+    /// Note this returns number of elements, not length of time series
     pub fn len(&self) -> usize {
         self.projections_complete.len()
+    }
+    /// Returns the time domain of the first series, which should be the same for all series.
+    pub fn secs(&self) -> Range<usize> {
+        self.start_second..self.start_second.add(self.projections_complete.iter().next().unwrap().len())
     }
 }
 
@@ -762,7 +767,6 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
     ) -> Result<(), Box<dyn Error>> {
 
         // Retrieve series and days used from ProjectionsComplete
-        let projections_complete = &projections_complete_struct.projections_complete;
         let days = projections_complete_struct.days.clone();
 
         // Calculate coherence_times: a vector containing the integer number of seconds for every
@@ -770,7 +774,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         //
         // projections_complete is the map containing the stitched-together timeseries
         // so the length of one of the time series is the total amount of time we are analyzing.
-        let total_secs: usize = projections_complete.iter().next().unwrap().value().len();
+        let total_secs: usize = projections_complete_struct.projections_complete.iter().next().unwrap().value().len();
         let total_time = total_secs as f64;
         let coherence_times: Vec<usize> = coherence_times(total_time, THRESHOLD);
 
@@ -793,26 +797,26 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             .zip(frequency_bins)
             .collect();
 
-        // Calculate data vector for this local set.
-        let data_vector_dashmap = theory
-            // .calculate_data_vector(&projections_complete, &local_set);
-            .calculate_data_vector(&projections_complete, &set);
-        println!("finished data vector");
+        // // Calculate data vector for this local set.
+        // let data_vector_dashmap = theory
+        //     // .calculate_data_vector(&projections_complete, &local_set);
+        //     .calculate_data_vector(&projections_complete, &set);
+        // log::debug!("finished data vector");
         
             // Calculate the theory mean
         let theory_mean = theory
             // .calculate_mean_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
             .calculate_mean_theory(&set, total_secs, coherence_times.len(), Arc::clone(&auxiliary_complete));
-        println!("finished mean");
+        log::debug!("finished mean");
 
         // Calculate the theory var
         let theory_var = theory
             // .calculate_var_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
-            .calculate_var_theory(&set, &projections_complete, coherence_times.len(), days, stationarity, auxiliary_complete);
-        println!("finished var");
+            .calculate_var_theory(&set, &projections_complete_struct, coherence_times.len(), days, stationarity, auxiliary_complete);
+        log::debug!("finished var");
         
 
-        println!("{} {} {} elements", data_vector_dashmap.len(), theory_mean.len(), theory_var.len());
+        // println!("{} {} {} elements", data_vector_dashmap.len(), theory_mean.len(), theory_var.len());
 
         Ok(())
     }

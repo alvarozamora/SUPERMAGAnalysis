@@ -6,7 +6,8 @@ use supermag_analysis::theory::dark_photon::DarkPhoton;
 
 fn main() {
 
-    env_logger::init();
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Debug);
     
     // Define stationarity time, Coherence time 
     // const STATIONARITY_TIME: Stationarity = Stationarity::Daily(1);
