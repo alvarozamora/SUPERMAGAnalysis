@@ -281,7 +281,7 @@ impl Theory for DarkPhoton {
                         let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
                         let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
                         let relevant_range = start_relevant..=end_relevant;
-                        println!("relevant_range is {start_relevant}..={end_relevant}");
+                        log::debug!("relevant_range is {start_relevant}..={end_relevant}");
                         let relevant_values = fft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range));
 
                         // Get all relevant triplets
