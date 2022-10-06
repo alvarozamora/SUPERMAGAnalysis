@@ -1110,7 +1110,7 @@ impl Theory for DarkPhoton {
                                     let (element_pair, power) = kv_inner.pair();
 
                                     // Get start and end seconds for this power
-                                    let (power_start, power_end) = (power.start_sec, power.start_sec);
+                                    let (power_start, power_end) = (power.start_sec, power.end_sec);
 
                                     // Calculate overlap (in number of seconds)
                                     // TODO: verify that these two ends are both inclusive ends,
