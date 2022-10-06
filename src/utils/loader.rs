@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::collections::HashMap;
 use std::io::prelude::*;
+use std::ops::Range;
 use std::sync::Arc;
 use std::path::PathBuf;
 use anyhow::Result;
@@ -16,6 +17,8 @@ use futures::future::join_all;
 use ndarray::Axis;
 use rayon::prelude::*;
 use rayon::iter::*;
+use crate::weights::{Coherence, Stationarity};
+use crate::theory::NonzeroElement;
 
 pub type TimeSeries = Array1<f32>;
 pub type Index = usize;
@@ -286,29 +289,33 @@ pub struct Chunk {
 pub struct DatasetLoader {
     pub coordinate_map: Arc<HashMap<StationName, Coordinates>>,
     pub semivalid_chunks: Arc<DashMap<Index, Vec<Chunk>>>,
-    days: usize,
-    chunk: usize,
+    days: Range<usize>,
+    chunk_size_in_days: usize,
+    // chunk: usize,
 }
 
 impl DatasetLoader {
 
     // This function gathers all metadata required for loading a chunk of data
-    pub fn new(days: usize) -> Self {
+    pub fn new(days: Option<Range<usize>>, coherence: Coherence) -> Self {
+
+        // Size of data chunks
+        let coherence_time_in_days = match coherence {
+            Coherence::Days(days) => days,
+            Coherence::Yearly => todo!(),
+        };
 
         // Construct coordinate map 
         let coordinate_map = Arc::new(construct_coordinate_map());
 
         // Find all stations for which there is data for this year
-        let semivalid_chunks = retrieve_chunks(days);
-
-        // Chunk initialized at zero
-        let chunk = 0;
+        let semivalid_chunks = retrieve_chunks(days.clone(), coherence_time_in_days);
 
         Self {
             coordinate_map,
             semivalid_chunks,
-            days,
-            chunk,
+            days: days.unwrap_or(DATA_DAYS),
+            chunk_size_in_days: coherence_time_in_days,
         }
 
     }
@@ -422,7 +429,10 @@ fn retrieve_stations(year: usize) -> Vec<String> {
     paths
 }
 
-fn retrieve_chunks(days: usize) -> Arc<DashMap<Index, Vec<Chunk>>> {
+fn retrieve_chunks(
+    days: Option<Range<usize>>,
+    chunk_size_in_days: usize
+) -> Arc<DashMap<Index, Vec<Chunk>>> {
 
     // Gather paths to all stations
     let stations: Vec<_> = glob("../stations/*").unwrap().map(|x| x.unwrap()).collect::<Vec<_>>();
@@ -433,9 +443,9 @@ fn retrieve_chunks(days: usize) -> Arc<DashMap<Index, Vec<Chunk>>> {
 
 
     // Iterate through every chunk of days
-    DATA_DAYS
-        .step_by(days)
-        .map(|x| (x..).take(days))
+    days.unwrap_or(DATA_DAYS)
+        .step_by(chunk_size_in_days)
+        .map(|x| (x..).take(chunk_size_in_days))
         .collect::<Vec<_>>()
         .into_par_iter()
         .enumerate()
@@ -502,6 +512,48 @@ fn validate_buffer_size(buffer: &[u8], expected_size: usize, year: usize) -> Res
         );
     }
     Ok(())
+}
+
+
+
+/// This is a recursive function that returns the number of days since the first day there was data.
+pub fn day_since_first(day: usize, year: usize) -> usize {
+
+    match year {
+        1998 => day,
+        1999.. => {
+
+            // Calculate how many days there were in the last year
+            let days_in_last_year = if ( year - 1 ) % 4 == 0 { 366 } else { 365 };
+
+            return day + day_since_first(days_in_last_year, year - 1)
+        },
+        _ => panic!("the year provided is before there was any data")
+    }
+}
+
+#[test]
+fn test_day_since_first() {
+
+    type Day = usize;
+    type Year = usize;
+
+    // 1st day ever (0th day)
+    assert_eq!(0, day_since_first(0, 1998));
+
+    // 101st day of the first year (100th day, zero-indexed)
+    assert_eq!(100, day_since_first(100, 1998));
+
+    // First day of the second year
+    assert_eq!(365, day_since_first(0, 1999));
+
+    // Testing C08_4029 (which was apparently wrongly indexed)
+    assert_eq!(4018, day_since_first(0, 2009));
+
+    // The day this unit test was written 
+    // (182nd day of 2022, zero-indexed)
+    const TODAY: (Day, Year) = (181, 2022);
+    assert_eq!(8947, day_since_first(TODAY.0, TODAY.1));
 }
 
 

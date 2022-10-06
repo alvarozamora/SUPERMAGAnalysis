@@ -3,19 +3,24 @@
 
 pub mod dark_photon;
 
+use serde::de::DeserializeOwned;
+use serde::{Serialize, Deserialize};
 use sphrs::{ComplexSHType, Coordinates as SphrsCoordinates, SHEval};
 use dashmap::DashMap;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::fmt::Debug;
+use std::ops::Range;
 use num_complex::Complex;
 use ndarray::Array1;
 use special::Gamma;
+use crate::weights::{Stationarity, ProjectionsComplete};
 use crate::{
     utils::{
         coordinates::construct_coordinate_map,
         loader::Dataset,
     },
+    weights::FrequencyBin,
 };
 
 const NULL: f32 = 0.0;
@@ -31,7 +36,6 @@ pub type StationName = String;
 pub type VecSphFn = Arc<dyn Fn(Theta, Phi) -> VecSph + 'static + Send + Sync>;
 pub type TimeSeries = Array1<f32>;
 pub type Series = Array1<f32>;
-pub type ComplexSeries = Array1<ndrustfft::Complex<f32>>;
 pub type DataVector = DashMap<NonzeroElement, TimeSeries>;
 pub type Modes = Vec<Mode>;
 pub type NonzeroElements = Vec<NonzeroElement>;
@@ -41,43 +45,91 @@ pub type FrequencyIndex = usize;
 pub type DFTValue = Complex<f32>;
 
 
-pub trait Theory: Clone + Send {
+pub trait FromChunkMap: Sized {
+    fn from_chunk_map(
+        chunk_map: &DashMap<usize, Self>,
+        secs_per_chunk: usize,
+        starting_value: usize,
+        size: usize,
+    ) -> Self;
+}
+
+pub trait Theory: Send + Debug {
 
     // const MODES: Modes;
-    // const NONZERO_ELEMENTS: NonzeroElements;
+    const NONZERO_ELEMENTS: usize;
+    const MIN_STATIONS: usize;
 
-    // This calculates the pre-DFT data vector X^n_i's for a given theory.
+    // Any auxiliary values
+    type AuxiliaryValue: Serialize + DeserializeOwned + Send + Sync + FromChunkMap;
+
+    // Theory Average and Variance (Noise Spectra)
+    type Mu: Serialize + DeserializeOwned + Send + Sync;
+    type Var: Serialize + DeserializeOwned + Send + Sync;
+
+    /// Gets nonzero elements for the theory.
+    fn get_nonzero_elements() -> HashSet<NonzeroElement>;
+
+    /// This calculates the pre-FFT data vector X^n_i's for a given theory. It combines data from many
+    /// stations into a smaller subset of time series, weighted by their noise.
     fn calculate_projections(
         &self,
-        weights_n: Arc<DashMap<StationName, f32>>,
-        weights_e: Arc<DashMap<StationName, f32>>,
+        weights_n: &DashMap<StationName, f32>,
+        weights_e: &DashMap<StationName, f32>,
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
-        chunk_dataset: DashMap<StationName, Dataset>,
+        chunk_dataset: &DashMap<StationName, Dataset>,
     ) -> DashMap<NonzeroElement, TimeSeries>;
 
-    // /// This calculates the theoretical signal expected for the Earth's magnetic field
-    // /// for a given set of coordinates.
+    /// If a theory requires it, as does the dark photon one, this is where 
+    /// any auxiliary values are calculated while the raw data is loaded in memory.
+    fn calculate_auxiliary_values(
+        &self,
+        weights_n: &DashMap<StationName, f32>,
+        weights_e: &DashMap<StationName, f32>,
+        weights_wn: &TimeSeries,
+        weights_we: &TimeSeries,
+        chunk_dataset: &DashMap<StationName, Dataset>,
+    ) -> Self::AuxiliaryValue;
+
+    /// Finds X(k) for the relevant frequencies for a given coherence time.
+    /// For the dark photon, those are given by triplets, which are presently hard coded.
+    /// TODO: Change the return type to be an associated type for the theory.
     fn calculate_data_vector(
         &self,
-        projections: DashMap<NonzeroElement, TimeSeries>,
-        // frequencies: &[Frequency],
-        // total_time: f32,
-    ) -> DashMap<NonzeroElement, ComplexSeries>;
+        projections_complete: &ProjectionsComplete,
+        local_set: &Vec<(usize, FrequencyBin)>
+    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>)>>>;
+
+    /// Calculate mu for the theory. The first key in the map should be the coherence time, and the second key should be which chunk the mean is for.
+    fn calculate_mean_theory(
+        &self,
+        local_set: &Vec<(usize, FrequencyBin)>,
+        len_data: usize,
+        coherence_times: usize,
+        auxiliary_values: Arc<Self::AuxiliaryValue>,
+    ) -> DashMap<usize, DashMap<usize, Self::Mu>>;
+
+
+    /// Calculate the noise spectra for the theory for the different coherence times.
+    /// The first key in the map should be the coherence time, and the second key should be which chunk the mean is for.
+    fn calculate_var_theory(
+        &self,
+        local_set: &Vec<(usize, FrequencyBin)>,
+        projections_complete: &ProjectionsComplete,
+        coherence_times: usize,
+        days: Range<usize>,
+        stationarity: Stationarity,
+        auxiliary_values: Arc<Self::AuxiliaryValue>,
+    ) -> DashMap<usize, Self::Var>;
 }
 
 
-#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mode(pub Degree, pub Order);
 
-#[derive(Debug)]
-pub struct VecSphs<T: IntoIterator<Item=Complex<f32>>> {
-    pub vec_sphs: HashMap<StationName, T>,
-    modes: Modes,
-}
-
 /// These are the nonzero elements for a given theory
-#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub struct NonzeroElement {
     /// This is the index assigned to the element. Not to be confused with the
     /// chunk index
@@ -88,7 +140,7 @@ pub struct NonzeroElement {
     pub assc_mode: (Mode, Component),
 }
 
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
 pub enum Component {
     RadialReal,
     RadialImag,
@@ -100,51 +152,56 @@ pub enum Component {
 
 
 
-impl VecSphs<PhiLM> {
-    pub fn new(modes: Modes) -> Self {
+// #[derive(Debug)]
+/// NOTE: I don't know why I wrote this... but keeping it around just in case
+// struct VecSphs<T: IntoIterator<Item=Complex<f32>>> {
+//     pub vec_sphs: HashMap<StationName, T>,
+//     modes: Modes,
+// }
 
-        // Construct Coordinate Map
-        let coordinate_map = construct_coordinate_map();
+// impl VecSphs<PhiLM> {
+//     /// NOTE: I don't know why I wrote this... It's unused and it sums all the modes up.
+//     fn new(modes: Modes) -> Self {
 
-        // // Initialize HashMap that stores signal
-        // let mut signal = HashMap::new();
+//         // Construct Coordinate Map
+//         let coordinate_map = construct_coordinate_map();
 
-        // Construct spherical harmonic functions for each mode
-        let mode_fns: Vec<(Mode, VecSphFn)> = modes
-            .iter()
-            .map(|&mode| (mode, vector_spherical_harmonic(mode)))
-            .collect();
+//         // Construct spherical harmonic functions for each mode
+//         let mode_fns: Vec<(Mode, VecSphFn)> = modes
+//             .iter()
+//             .map(|&mode| (mode, vector_spherical_harmonic(mode)))
+//             .collect();
 
             
-        let vec_sphs: HashMap<StationName, PhiLM> = coordinate_map.iter().map(|(station, coordinates)| {
+//         let vec_sphs: HashMap<StationName, PhiLM> = coordinate_map.iter().map(|(station, coordinates)| {
 
-            // Unpack coord
-            // let coordinates: Coordinates = *coordinate_map.get(&station).unwrap();
-            let [theta, phi] = [coordinates.polar as f32, coordinates.longitude as f32];
+//             // Unpack coord
+//             // let coordinates: Coordinates = *coordinate_map.get(&station).unwrap();
+//             let [theta, phi] = [coordinates.polar as f32, coordinates.longitude as f32];
 
-            // Initialize value
-            let mut phi_lm: [Complex<f32>; 2] = [Complex::default(); 2];
+//             // Initialize value
+//             let mut phi_lm: [Complex<f32>; 2] = [Complex::default(); 2];
 
-            // Add modes
-            for (mode, vec_sph_fn) in mode_fns.iter() {
+//             // Add modes
+//             for (_mode, vec_sph_fn) in mode_fns.iter() {
                 
-                let _phi = vec_sph_fn(theta, phi).phi;
+//                 let phi = vec_sph_fn(theta, phi).phi;
 
-                phi_lm[0] += _phi[0];
-                phi_lm[1] += _phi[1];
-            }
+//                 phi_lm[0] += phi[0];
+//                 phi_lm[1] += phi[1];
+//             }
 
-            // assert!(signal.insert(station, phi_lm).is_none());
-            (station.clone(), phi_lm)
-        }).collect();
+//             // assert!(signal.insert(station, phi_lm).is_none());
+//             (station.clone(), phi_lm)
+//         }).collect();
 
 
-        Self {
-            vec_sphs,
-            modes
-        }
-    }
-}
+//         Self {
+//             vec_sphs,
+//             modes
+//         }
+//     }
+// }
 
 #[derive(Debug)]
 pub struct VecSph {
@@ -164,7 +221,7 @@ pub struct VecSph {
 pub fn vector_spherical_harmonics(modes: Box<[Mode]>) -> DashMap<Mode, VecSphFn> {
 
     // Initialize return value
-    let mut hashmap = DashMap::new();
+    let hashmap = DashMap::new();
 
     // Get vector spherical harmonic functions for every mode
     for &mode in modes.iter() {

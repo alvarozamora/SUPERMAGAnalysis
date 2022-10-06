@@ -1,10 +1,10 @@
 use sphrs::{ComplexSHType, Coordinates as SphrsCoordinates, SHEval};
 use dashmap::DashMap;
-use num_complex::Complex;
 use special::Gamma;
 use num_traits::{Float, FromPrimitive, FloatConst};
 use std::fmt::Debug;
 use std::ops::Mul;
+use ndrustfft::Complex;
 
 /// A helpful type alias to distingush the two i64 arguments of the function in `VecSphFn`.
 pub type Degree = i64;
@@ -47,7 +47,7 @@ where
 {
 
     // Initialize return value
-    let mut hashmap = DashMap::new();
+    let hashmap = DashMap::new();
 
     // Get vector spherical harmonic functions for every mode
     for &mode in modes.iter() {
