@@ -277,7 +277,7 @@ impl Theory for DarkPhoton {
                             return // Err("no triplets exist")
                         }
 
-                        // let start_relevant: usize = *frequency_bin.multiples.start()-approx_sidereal;
+                        // Get the start and end of the range of relevant frequencies from this bin
                         let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
                         let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
                         let relevant_range = start_relevant..=end_relevant;
@@ -290,6 +290,7 @@ impl Theory for DarkPhoton {
                             .into_iter()
                             .map(|window| 
                                 (
+                                    // NOTE: technically this might be an expensive clone, but it is likely okay.
                                     window.slice(s![0_usize, ..]).to_owned(),
                                     window.slice(s![approx_sidereal, ..]).to_owned(),
                                     window.slice(s![2*approx_sidereal, ..]).to_owned(),
