@@ -933,16 +933,16 @@ impl Theory for DarkPhoton {
             // python implementation defines the `end` index to be the first index of the
             // next chunk, since start:end is not end inclusive. This means the size of 
             // the chunks are (end - start + 1)
-            let (start, end) = stationarity.get_year_indices(year);
+            let (start_stationarity, end_stationarity) = stationarity.get_year_indices(year);
             
             // Now convert these indices to the indices within the subset used
             // let secs = (days.start * 24 * 60 * 60)..(days.end * 24 * 60 * 60);
             let secs = projections_complete.secs();
-            let (start, end) = (
-                secs.clone().position(|i| i == start).expect("sec index is out of bounds"), 
-                secs.clone().position(|i| i == end).expect("sec index is out of bounds"),
+            let (start_in_series, end_in_series) = (
+                secs.clone().position(|i| i == start_stationarity).expect("sec index is out of bounds"), 
+                secs.clone().position(|i| i == end_stationarity).expect("sec index is out of bounds"),
             );
-            assert_ne!(start, end, "zero size");
+            assert_ne!(start_in_series, end_in_series, "zero size");
 
             // Get the subseries for this year
             let projections_subset: DashMap<NonzeroElement, Vec<f32>> = projections_complete
@@ -950,16 +950,16 @@ impl Theory for DarkPhoton {
                 .map(|kv| {
                     // Get element and series
                     let (element, complete_series) = kv.pair();
-                    println!("getting yearly subset {}..={} of complete series with length {}", start, end, complete_series.len());
-                    let pair = (element.clone(), complete_series.slice(s![start..=end]).to_vec());
+                    println!("getting yearly subset {}..={} of complete series with length {}", start_in_series, end_in_series, complete_series.len());
+                    let pair = (element.clone(), complete_series.slice(s![start_in_series..=end_in_series]).to_vec());
                     println!("got yearly subset of complete series");
                     pair
                 }).collect();
         
             // Get chunk indices
-            let num_chunks: usize = ((end - start + 1) / TAU).max(1);
-            let chunk_size: usize = (end - start + 1) / num_chunks;
-            let chunk_mod: usize = (end - start + 1) % num_chunks;
+            let num_chunks: usize = ((end_in_series - start_in_series + 1) / TAU).max(1);
+            let chunk_size: usize = (end_in_series - start_in_series + 1) / num_chunks;
+            let chunk_mod: usize = (end_in_series - start_in_series + 1) % num_chunks;
             let stationarity_chunks: Vec<[usize; 2]> = (0..num_chunks)
                 .map(|k| {
                     [k * (chunk_size + downtime) + k.min(chunk_mod), k * (chunk_size + downtime) + (k + 1).min(chunk_mod) + chunk_size]
@@ -1011,8 +1011,8 @@ impl Theory for DarkPhoton {
                         // Package power with metadata
                         let power = Power {
                             power: padded_series,
-                            start_sec: start,
-                            end_sec: end,
+                            start_sec: start_in_series,
+                            end_sec: end_in_series,
                         };
 
                         (element.clone(), power)
@@ -1042,7 +1042,7 @@ impl Theory for DarkPhoton {
             let avg_power: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DARK_PHOTON_NONZERO_ELEMENTS
                 .iter()
                 .cartesian_product(DARK_PHOTON_NONZERO_ELEMENTS.iter())
-                .map(|(e1, e2)| ((e1.clone(), e2.clone()), Power { power: Array1::zeros(2*TAU), start_sec: start, end_sec: end }))
+                .map(|(e1, e2)| ((e1.clone(), e2.clone()), Power { power: Array1::zeros(2*TAU), start_sec: start_in_series, end_sec: end_in_series }))
                 .collect();
             // Then, sum (get denominator before consuming iterator)
             let denominator = chunk_collection.len() as f32;
