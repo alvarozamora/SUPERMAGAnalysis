@@ -1,19 +1,20 @@
 use super::*;
-use std::{collections::HashMap, ops::{Range, Sub, AddAssign, DivAssign}};
+use std::{collections::HashMap, ops::{Range, Sub}};
 use dashmap::DashMap;
+use interp::interp;
+use interp1d::Interp1d;
 use itertools::Itertools;
-use rustfft::{num_complex::ComplexFloat, FftPlanner};
+use rustfft::FftPlanner;
 use serde_derive::{Serialize, Deserialize};
-// use goertzel_filter::dft;
 use std::sync::Arc;
 use crate::{utils::{
-    loader::{Dataset, Index},
-    approximate_sidereal, coordinates::Coordinates,
-}, constants::{SECONDS_PER_DAY, SIDEREAL_DAY_SECONDS}, weights::{Weights, in_longest_subset}};
+    loader::Dataset,
+    approximate_sidereal, coordinates::Coordinates, fft::get_frequency_range_1s,
+}, constants::{SIDEREAL_DAY_SECONDS}, weights::in_longest_subset};
 use std::ops::{Mul, Div, Add};
 use ndrustfft::{FftHandler, ndfft};
 use rayon::prelude::*;
-use ndarray::{s, ArrayView1, ScalarOperand};
+use ndarray::{s, ScalarOperand};
 use num_traits::{ToPrimitive, Float, Num};
 use ndrustfft::Complex;
 use std::f64::consts::PI;
@@ -21,6 +22,9 @@ use std::f32::consts::PI as SINGLE_PI;
 
 const ZERO: Complex<f32> = Complex::new(0.0, 0.0);
 const ONE: Complex<f32> = Complex::new(1.0, 0.0);
+
+/// Size of chunks (used for noise spectra ffts)
+const TAU: usize = 16384 * 64;
 
 type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
 #[derive(Clone)]
@@ -224,7 +228,7 @@ impl Theory for DarkPhoton {
         _chunk_dataset: &DashMap<StationName, Dataset>,
     ) -> Self::AuxiliaryValue {
         DarkPhotonAuxiliary {
-            h: calculate_auxiliary_values(weights_n, weights_e, weights_wn, weights_we),
+            h: dark_photon_auxiliary_values(weights_n, weights_e, weights_wn, weights_we),
         }
     }
 
@@ -921,27 +925,29 @@ impl Theory for DarkPhoton {
         // key is stationary time chunk (e.g. year)
         let spectra = DashMap::with_capacity(coherence_times);
 
-        /// Size of chunks
-        const TAU: usize = 16384 * 64;
         let downtime = 0;
 
         // for year in 2004..2020 {
         // NOTE: This is hardcoded for stationarity = 1 year
-        (2004..2020).into_par_iter().for_each(|year| {
+        // TODO: par iter
+        // (2004..2020).for_each(|year| {
+        (2007..=2007).for_each(|year| {
 
             // Get stationarity period indices (place within entire SUPERMAG dataset)
             // NOTE: this definition varies from original implementation. The original
             // python implementation defines the `end` index to be the first index of the
             // next chunk, since start:end is not end inclusive. This means the size of 
             // the chunks are (end - start + 1)
-            let (start_stationarity, end_stationarity) = stationarity.get_year_indices(year);
+            let (start_stationarity, end_stationarity) = dbg!(stationarity.get_year_indices(year));
             
             // Now convert these indices to the indices within the subset used
-            // let secs = (days.start * 24 * 60 * 60)..(days.end * 24 * 60 * 60);
-            let secs = projections_complete.secs();
+            let secs: Range<usize> = projections_complete.secs();
             let (start_in_series, end_in_series) = (
-                secs.clone().position(|i| i == start_stationarity).expect("sec index is out of bounds"), 
-                secs.clone().position(|i| i == end_stationarity).expect("sec index is out of bounds"),
+                // TODO: make sure these fallback indices are correct
+                dbg!(secs.clone().position(|i| i == start_stationarity).unwrap_or(secs.start)),
+                    // .expect("sec index is out of bounds"), 
+                dbg!(secs.clone().position(|i| i == end_stationarity).unwrap_or(secs.end-1)),
+                    // .expect("sec index is out of bounds"),
             );
             assert_ne!(start_in_series, end_in_series, "zero size");
 
@@ -984,25 +990,25 @@ impl Theory for DarkPhoton {
                         let (element, year_series) = kv.pair();
 
                         // Get chunk from year
-                        println!("getting chunk from year");
+                        log::trace!("getting chunk from year");
                         let chunk_from_year = &year_series[stationarity_chunk[0]..stationarity_chunk[1]];
-                        println!("got chunk from year");
+                        log::trace!("got chunk from year");
 
                         // Padded series
                         let chunk_size = stationarity_chunk[1] - stationarity_chunk[0];
                         let mut padded_series = Array1::<Complex<f32>>::zeros(2*TAU);
-                        println!(
+                        log::trace!(
                             "size of chunk is {}, being placed in a {} series of zeros",
                             chunk_size, padded_series.len(),
                         );
 
-                        println!("modifying series");
+                        log::trace!("modifying series");
                         padded_series
                             .slice_mut(s![0..chunk_size])
                             .iter_mut()
                             .zip(chunk_from_year)
                             .for_each(|(ps, s)| { *ps = s.into(); });
-                        println!("modified series");
+                        log::trace!("modified series");
 
 
                         // FFT of padded series
@@ -1070,6 +1076,23 @@ impl Theory for DarkPhoton {
             spectra.insert(year, avg_power);
             
         });
+
+        let power_interpolators: DashMap<_, DashMap<_,_>> = spectra
+            .par_iter()
+            .map(|kv| {
+                let (stationarity_time, power_map) = kv.pair();
+                (
+                    *stationarity_time,
+                    power_map
+                        .par_iter()
+                        .map(|kv_inner| {
+                            let (element_pair, power) = kv_inner.pair();
+                            let power_frequencies: Vec<f32> = power.frequencies();
+                            let power_vec = power.power.to_vec();
+                            (element_pair.clone(), Interp1d::new_unsorted(power_frequencies, power_vec).expect("failed to construct power interpolator"))
+                        }).collect()
+                )
+            }).collect();
         
         // TODO stitch spectra together according to coherence times
         let result = DashMap::with_capacity(coherence_times);
@@ -1096,14 +1119,15 @@ impl Theory for DarkPhoton {
                         .min(len_data);
                     log::trace!("calculated start and end indices");
 
-                    // Check all spectra for any overlap
+                    // Check all spectra (over all stationarity periods) for any overlap
                     spectra
                         .iter()
                         .for_each(|kv| {
 
-                            // Only need power from key value pair
-                            let power_map = kv.value();
+                            // Unpack key value pair
+                            let (stationarity_time, power_map) = kv.pair();
 
+                            // Iterate through every element in the 5x5 map
                             power_map
                                 .into_iter()
                                 .for_each(|kv_inner| {
@@ -1116,7 +1140,7 @@ impl Theory for DarkPhoton {
 
                                     // Calculate overlap (in number of seconds)
                                     // TODO: verify that these two ends are both inclusive ends,
-                                    //       as that is what the function assumes.
+                                    // as that is what the function assumes.
                                     let overlap: usize = calculate_overlap(
                                         chunk_start,
                                         chunk_end,
@@ -1126,12 +1150,31 @@ impl Theory for DarkPhoton {
 
                                     // Add contribution to chunk if there is overlap
                                     if overlap > 0 {
+
+                                        // Interpolate power to appropriate frequencies
+                                        let frequencies_to_interpolate_to: Vec<f32> = frequency_bin
+                                            .multiples
+                                            .clone()
+                                            .map(|i| i as f32 * frequency_bin.lower as f32)
+                                            .collect();
+                                        let interpolated_power: Array1<Complex<f32>> = frequencies_to_interpolate_to
+                                            .into_iter()
+                                            .map(|f| {
+                                                power_interpolators
+                                                    .get(&stationarity_time)
+                                                    .expect("interpolator should exist for this stationarity time")
+                                                    .get(element_pair)
+                                                    .expect("interpolator should exist for this element pair")
+                                                    .interpolate_checked(f)
+                                                    .unwrap(/* unwrapping for now if out of bounds */)
+                                            }).collect();
+
                                         inner_chunk_map
                                             .entry(element_pair.clone())
                                             .and_modify(|p| {
-                                                p.add_assign(&power.mul_scalar(overlap as f32).power)
+                                                p.add_assign(&(&interpolated_power).mul(overlap as f32))
                                             })
-                                            .or_insert(Power { power: power.mul_scalar(overlap as f32).power, start_sec: chunk_start, end_sec: chunk_end });
+                                            .or_insert(Power { power: interpolated_power.mul(overlap as f32), start_sec: chunk_start, end_sec: chunk_end });
                                     }
                             });
                         });
@@ -1205,7 +1248,7 @@ fn calculate_overlap(
 
 
 /// This function takes in the weights w_i along with the station coordinates and calculates H_i(t)
-fn calculate_auxiliary_values(
+fn dark_photon_auxiliary_values(
     weights_n: &DashMap<StationName, f32>,
     weights_e: &DashMap<StationName, f32>,
     weights_wn: &TimeSeries,
@@ -1345,6 +1388,13 @@ impl<T: Float> Power<T> {
             power: (&self.power).mul(rhs),
             ..*self
         }
+    }
+    // TODO: ensure this is returning the right frequencies
+    fn frequencies(&self) ->  Vec<f32> {
+        get_frequency_range_1s(TAU.try_into().expect("usize to i64 failed"))
+            .into_iter()
+            .map(|double| double.to_f32().expect("double to single precision failed"))
+            .collect()
     }
 }
 

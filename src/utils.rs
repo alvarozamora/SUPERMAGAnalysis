@@ -9,9 +9,9 @@ pub mod igrf_decl;
 use crate::constants::*;
 use crate::weights::FrequencyBin;
 
-use std::{collections::HashSet, ops::Add};
+use std::collections::HashSet;
 
-use rayon::iter::IntoParallelIterator;
+use self::loader::day_since_first;
 
 /// Given some `usize` collection, find the largest contiguous subset.
 pub fn get_largest_contiguous_subset(set: &[usize]) -> (usize, usize) {
@@ -136,6 +136,30 @@ pub fn approximate_frequency(
 
 }
 
+pub fn sec_to_year(sec: usize) -> (usize, usize) {
+    let num_days = sec / 24 / 60 / 60;
+    let mut year = 1998;
+    let mut day = 0;
+    while num_days != day_since_first(day, year) {
+        if leap_year(year) && day == 365 {
+            day = 0;
+            year += 1;
+        } else if day == 364 {
+            day = 0;
+            year += 1;
+        } else {
+            day += 1;
+        }
+    }
+    (day, year)
+}
+
+/// not exact definition but works for this year range
+fn leap_year(year: usize) -> bool {
+    year % 4 == 0
+}
+
+
 #[test]
 fn test_approximate_sidereal_candidate1() {
 
@@ -229,6 +253,7 @@ fn test_maxprime_multiple_primes_prime_bigger_number() {
 #[test]
 #[ignore] /* u32 max is O(4 billion), so this takes a long time */
 fn test_f64_u32_casting() {
+    use rayon::iter::IntoParallelIterator;
     use rayon::iter::ParallelIterator;
     (0..std::u32::MAX)
         .into_par_iter()

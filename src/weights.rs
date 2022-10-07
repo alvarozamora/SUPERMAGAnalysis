@@ -100,7 +100,14 @@ impl ProjectionsComplete {
     }
     /// Returns the time domain of the first series, which should be the same for all series.
     pub fn secs(&self) -> Range<usize> {
-        self.start_second..self.start_second.add(self.projections_complete.iter().next().unwrap().len())
+        let mut proj = self.projections_complete.iter();
+        let old = proj.next().unwrap();
+        while let Some(new) = proj.next() {
+            assert_eq!(old.value().len(), new.value().len(), "lengths of projection series are not the same");
+        }
+        let secs = self.start_second..self.start_second.add(dbg!(old.value().len()));
+        assert_eq!(secs.end - secs.start, self.projections_complete.iter().next().unwrap().value().len());
+        secs
     }
 }
 
@@ -541,6 +548,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 get_largest_contiguous_subset(&set)
             };
             println!("rank {}: longest contiguous subset of chunks begins at {starting_value} and has length {size} chunks", balancer.rank);
+            println!("rank {}: this starts {:?} and ends {:?}", balancer.rank, sec_to_year(starting_value * 24 * 60 * 60), sec_to_year((starting_value + size) * 24 * 60 * 60));
 
             // TODO: generalize to yearly
             let secs_per_chunk = SECONDS_PER_DAY * days_per_chunk;
@@ -691,6 +699,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             let (size, starting_value): (usize, usize) = {
             
                 // To do this we first gather all chunks
+                // NOTE: this only works for days
                 let set: Vec<usize> = auxiliary_values
                     .par_iter_mut()
                     .map(|pair| *pair.key())
@@ -700,7 +709,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 get_largest_contiguous_subset(&set)
             };
             println!("rank {}: longest contiguous subset of chunks of auxilary values begins at {starting_value} and has length {size} chunks", balancer.rank);
-            start_second = starting_value;
+            start_second = starting_value * 24 * 60 * 60;
 
             // TODO: generalize to yearly
             let secs_per_chunk: usize = SECONDS_PER_DAY * days_per_chunk;
@@ -803,11 +812,11 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         //     .calculate_data_vector(&projections_complete, &set);
         // log::debug!("finished data vector");
         
-            // Calculate the theory mean
-        let theory_mean = theory
-            // .calculate_mean_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
-            .calculate_mean_theory(&set, total_secs, coherence_times.len(), Arc::clone(&auxiliary_complete));
-        log::debug!("finished mean");
+        // // Calculate the theory mean
+        // let theory_mean = theory
+        //     // .calculate_mean_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
+        //     .calculate_mean_theory(&set, total_secs, coherence_times.len(), Arc::clone(&auxiliary_complete));
+        // log::debug!("finished mean");
 
         // Calculate the theory var
         let theory_var = theory

@@ -15,15 +15,15 @@ type Declination = f64;
 
 const IGRF_DATA_FILE: &str = "./src/IGRF_declinations_for_1sec.txt";
 
-#[derive(Debug, Deserialize)]
-/// This struct is just used for deserialization of the text file
-pub struct IgrfDataLine {
-    year: usize,
-    station: String,
-    geolat: f64,
-    geolon: f64,
-    declination: f64,
-}
+// #[derive(Debug, Deserialize)]
+// /// This struct is just used for deserialization of the text file
+// struct IgrfDataLine {
+//     year: usize,
+//     station: String,
+//     geolat: f64,
+//     geolon: f64,
+//     declination: f64,
+// }
 
 
 lazy_static! {
