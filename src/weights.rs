@@ -105,7 +105,7 @@ impl ProjectionsComplete {
         while let Some(new) = proj.next() {
             assert_eq!(old.value().len(), new.value().len(), "lengths of projection series are not the same");
         }
-        let secs = self.start_second..self.start_second.add(dbg!(old.value().len()));
+        let secs = self.start_second..self.start_second.add(old.value().len());
         assert_eq!(secs.end - secs.start, self.projections_complete.iter().next().unwrap().value().len());
         secs
     }

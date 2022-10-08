@@ -1,9 +1,10 @@
 use super::*;
-use std::{collections::HashMap, ops::{Range, Sub}};
+use std::{collections::HashMap, ops::{Range, Sub, AddAssign}};
 use dashmap::DashMap;
 use interp::interp;
 use interp1d::Interp1d;
 use itertools::Itertools;
+use num_format::{ToFormattedString, Locale};
 use rustfft::FftPlanner;
 use serde_derive::{Serialize, Deserialize};
 use std::sync::Arc;
@@ -14,7 +15,7 @@ use crate::{utils::{
 use std::ops::{Mul, Div, Add};
 use ndrustfft::{FftHandler, ndfft};
 use rayon::prelude::*;
-use ndarray::{s, ScalarOperand};
+use ndarray::{s, ScalarOperand, Array2};
 use num_traits::{ToPrimitive, Float, Num};
 use ndrustfft::Complex;
 use std::f64::consts::PI;
@@ -131,7 +132,7 @@ impl Theory for DarkPhoton {
 
     type AuxiliaryValue = DarkPhotonAuxiliary;
     type Mu = DarkPhotonMu;
-    type Var = DashMap<(NonzeroElement, NonzeroElement), Power<f32>>;
+    type Var = DashMap<usize, DashMap<Triplet, Array2<Complex<f32>>>>;
 
     fn get_nonzero_elements() -> HashSet<NonzeroElement> {
 
@@ -931,22 +932,22 @@ impl Theory for DarkPhoton {
         // NOTE: This is hardcoded for stationarity = 1 year
         // TODO: par iter
         // (2004..2020).for_each(|year| {
-        (2007..=2007).for_each(|year| {
+        (2007..=2007).into_par_iter().for_each(|year| {
 
             // Get stationarity period indices (place within entire SUPERMAG dataset)
             // NOTE: this definition varies from original implementation. The original
             // python implementation defines the `end` index to be the first index of the
             // next chunk, since start:end is not end inclusive. This means the size of 
             // the chunks are (end - start + 1)
-            let (start_stationarity, end_stationarity) = dbg!(stationarity.get_year_indices(year));
+            let (start_stationarity, end_stationarity) = stationarity.get_year_indices(year);
             
             // Now convert these indices to the indices within the subset used
             let secs: Range<usize> = projections_complete.secs();
             let (start_in_series, end_in_series) = (
                 // TODO: make sure these fallback indices are correct
-                dbg!(secs.clone().position(|i| i == start_stationarity).unwrap_or(secs.start)),
+                secs.clone().position(|i| i == start_stationarity).unwrap_or(secs.start),
                     // .expect("sec index is out of bounds"), 
-                dbg!(secs.clone().position(|i| i == end_stationarity).unwrap_or(secs.end-1)),
+                secs.clone().position(|i| i == end_stationarity).unwrap_or(secs.end-1),
                     // .expect("sec index is out of bounds"),
             );
             assert_ne!(start_in_series, end_in_series, "zero size");
@@ -955,7 +956,7 @@ impl Theory for DarkPhoton {
             let projections_subset: DashMap<NonzeroElement, Vec<f32>> = projections_complete
                 .iter()
                 .map(|kv| {
-                    // Get element and series
+                    // Get element and the complete longest contiguous series
                     let (element, complete_series) = kv.pair();
                     println!("getting yearly subset {}..={} of complete series with length {}", start_in_series, end_in_series, complete_series.len());
                     let pair = (element.clone(), complete_series.slice(s![start_in_series..=end_in_series]).to_vec());
@@ -971,7 +972,7 @@ impl Theory for DarkPhoton {
                 .map(|k| {
                     [k * (chunk_size + downtime) + k.min(chunk_mod), k * (chunk_size + downtime) + (k + 1).min(chunk_mod) + chunk_size]
                 }).collect_vec();
-            dbg!(&stationarity_chunks);
+            // dbg!(&stationarity_chunks);
 
             // Set up an fft planner to reuse for all ffts in this year
             let mut planner = FftPlanner::new();
@@ -1074,7 +1075,7 @@ impl Theory for DarkPhoton {
             
             // Add along with the rest of the stationarity times
             spectra.insert(year, avg_power);
-            
+            log::info!("Finished calculating power for stationarity_time {year}");
         });
 
         let power_interpolators: DashMap<_, DashMap<_,_>> = spectra
@@ -1097,7 +1098,7 @@ impl Theory for DarkPhoton {
         // TODO stitch spectra together according to coherence times
         let result = DashMap::with_capacity(coherence_times);
         set
-            .into_iter()
+            .into_par_iter()
             .for_each(|(coherence_time, frequency_bin)| {
 
                 // First get the domain for the data used
@@ -1108,7 +1109,10 @@ impl Theory for DarkPhoton {
                 let num_chunks = len_data / coherence_time;
                 
                 // This is the inner chunk map from chunk to coherence time
-                let inner_chunk_map: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DashMap::new();
+                // let inner_chunk_map: DashMap<(NonzeroElement, NonzeroElement), DashMap<usize, Triplet<f32>>> = DashMap::new();
+                // NOTE: work in progress: restructuring to get the 5x5 2d arrays contiuous in memory
+                type Window = usize;
+                let inner_chunk_map: DashMap<Window, DashMap<Triplet, Array2<Complex<f32>>>> = DashMap::new();
 
                 for chunk in 0..num_chunks {
 
@@ -1121,7 +1125,7 @@ impl Theory for DarkPhoton {
 
                     // Check all spectra (over all stationarity periods) for any overlap
                     spectra
-                        .iter()
+                        .par_iter()
                         .for_each(|kv| {
 
                             // Unpack key value pair
@@ -1134,6 +1138,7 @@ impl Theory for DarkPhoton {
 
                                     // Get element pair and corresponding power
                                     let (element_pair, power) = kv_inner.pair();
+                                    let (e1, e2) = element_pair;
 
                                     // Get start and end seconds for this power
                                     let (power_start, power_end) = (power.start_sec, power.end_sec);
@@ -1151,10 +1156,22 @@ impl Theory for DarkPhoton {
                                     // Add contribution to chunk if there is overlap
                                     if overlap > 0 {
 
+                                        // Get values at relevant frequencies
+                                        let approx_sidereal: usize = approximate_sidereal(frequency_bin);
+                                        let num_fft_elements = *coherence_time;
+                                        if num_fft_elements < 2*approx_sidereal + 1 {
+                                            log::warn!("no triplets exist for {coherence_time}");
+                                            return // Err("no triplets exist")
+                                        }
+
+                                        // Get the start and end of the range of relevant frequencies from this bin
+                                        let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
+                                        let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
+                                        let relevant_range = start_relevant..=end_relevant;
+                                        log::trace!("relevant_range is {start_relevant}..={end_relevant}");
+
                                         // Interpolate power to appropriate frequencies
-                                        let frequencies_to_interpolate_to: Vec<f32> = frequency_bin
-                                            .multiples
-                                            .clone()
+                                        let frequencies_to_interpolate_to: Vec<f32> = relevant_range
                                             .map(|i| i as f32 * frequency_bin.lower as f32)
                                             .collect();
                                         let interpolated_power: Array1<Complex<f32>> = frequencies_to_interpolate_to
@@ -1169,12 +1186,78 @@ impl Theory for DarkPhoton {
                                                     .unwrap(/* unwrapping for now if out of bounds */)
                                             }).collect();
 
-                                        inner_chunk_map
-                                            .entry(element_pair.clone())
-                                            .and_modify(|p| {
-                                                p.add_assign(&(&interpolated_power).mul(overlap as f32))
-                                            })
-                                            .or_insert(Power { power: interpolated_power.mul(overlap as f32), start_sec: chunk_start, end_sec: chunk_end });
+                                        // // NOTE: leaving this here in case we ever need to use the interpolated power before grouping into triplets.
+                                        // inner_chunk_map
+                                        //     .entry(element_pair.clone())
+                                        //     .and_modify(|p| {
+                                        //         p.add_assign(&(&interpolated_power).mul(overlap as f32))
+                                        //     })
+                                        //     .or_insert(Power { power: interpolated_power.mul(overlap as f32), start_sec: chunk_start, end_sec: chunk_end });
+
+                                        // Get all relevant triplets and multiply them by their overlap weight
+                                        // let relevant_triplets: Vec<Triplet<f32>> = interpolated_power
+                                        interpolated_power
+                                            .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
+                                            .into_iter()
+                                            .enumerate()
+                                            .for_each(|(i, window)| {
+
+                                                // Get triplet
+                                                let low = window[0_usize].mul(overlap as f32);
+                                                let mid = window[approx_sidereal].mul(overlap as f32);
+                                                let high =  window[2*approx_sidereal].mul(overlap as f32);
+                                                
+                                                // The element indices start at 1 so subtract 1
+                                                // i.e. (X1, X2, X3, X4, X5) -> (0, 1, 2, 3, 4)
+                                                let (ix, iy) = (e1.index-1, e2.index-1);
+
+                                                // Add/store triplet
+                                                inner_chunk_map
+                                                    .entry(i)
+                                                    .and_modify(|triplet_map| {
+
+                                                        // First, add to low triplet matrix (fa-fdhat)
+                                                        triplet_map
+                                                            .entry(Triplet::Low)
+                                                            .and_modify(|five_by_five_array| { five_by_five_array[[ix, iy]] += low; })
+                                                            .or_insert_with(|| { panic!("should already be initialized in or_insert_with below"); });
+
+                                                        // Then, add to mid triplet matrix (fa)
+                                                        triplet_map
+                                                            .entry(Triplet::Mid)
+                                                            .and_modify(|five_by_five_array| { five_by_five_array[[ix, iy]] += mid; })
+                                                            .or_insert_with(|| { panic!("should already be initialized in or_insert_with below"); });
+
+                                                        // Finally, add to hi triplet matrix (fa+fdhat)
+                                                        triplet_map
+                                                            .entry(Triplet::High)
+                                                            .and_modify(|five_by_five_array| { five_by_five_array[[ix, iy]] += low; })
+                                                            .or_insert_with(|| { panic!("should already be initialized in or_insert_with below"); });
+                                                    }).or_insert_with(|| {
+                                                        // Calculate the triplet of arrays with the first entry
+                                                        let low_array =  {
+                                                            let mut zero_array = Array2::zeros((5,5));
+                                                                zero_array[[ix, iy]] = low;
+                                                                zero_array
+                                                        };
+                                                        let mid_array =  {
+                                                            let mut zero_array = Array2::zeros((5,5));
+                                                                zero_array[[ix, iy]] = mid;
+                                                                zero_array
+                                                        };
+                                                        let high_array =  {
+                                                            let mut zero_array = Array2::zeros((5,5));
+                                                                zero_array[[ix, iy]] = high;
+                                                                zero_array
+                                                        };
+                                                        // Package and initialize map
+                                                        [
+                                                            (Triplet::Low, low_array),
+                                                            (Triplet::Mid, mid_array),
+                                                            (Triplet::High, high_array),
+                                                        ].into_iter().collect()
+                                                    });
+                                            });
                                     }
                             });
                         });
@@ -1182,7 +1265,54 @@ impl Theory for DarkPhoton {
                 // Insert inner chunk containing this coherence time's power spectrum
                 result
                     .insert(*coherence_time, inner_chunk_map);
+                log::info!("Finished calculating power for coherence_time {coherence_time}");
             });
+
+        // work in progress: let's try inverting
+        use ndarray_linalg::solve::Inverse;
+        let success_counter = std::sync::atomic::AtomicU32::new(0);
+        let fail_counter = std::sync::atomic::AtomicU32::new(0);
+        let timer = std::time::Instant::now();
+        log::info!("Starting matrix inversions");
+        let inversions: DashMap<usize, DashMap<usize, DashMap<Triplet, _>>> = result
+            .par_iter()
+            .map(|kv| {
+                let (coherence_time, window_map) = kv.pair();
+                (*coherence_time, window_map
+                    .par_iter()
+                    .map(|kv2| {
+                        let (window, triplet_map) = kv2.pair();
+                        (*window, triplet_map
+                            .par_iter()
+                            .map(|kv3| {
+                                let (triplet, five_by_five_array) = kv3.pair();
+                                // log::info!("inverting {coherence_time}, {window}, {triplet:?}");
+                                (
+                                    *triplet,
+                                    five_by_five_array
+                                        .map(|x| x.to_f64().unwrap())
+                                        .inv()
+                                        .map(|x| { 
+                                            // log::info!("Successful inversion");
+                                            success_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                            x 
+                                        })
+                                        .map_err(|e| {
+                                            log::error!("Unsuccessful inversion");
+                                            fail_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                            e 
+                                        })//.expect("unable to invert matrix")
+                                )
+                            }).collect())
+                    }).collect())
+            }).collect();
+        dbg!(inversions.len());
+        log::info!(
+            "Completed matrix inversions in {} millis. Did a total of {} successul inversions and {} unsuccessful inversions",
+            timer.elapsed().as_millis().to_formatted_string(&Locale::en),
+            success_counter.load(std::sync::atomic::Ordering::SeqCst),
+            fail_counter.load(std::sync::atomic::Ordering::SeqCst),
+        );
 
         result
     }
@@ -1248,6 +1378,8 @@ fn calculate_overlap(
 
 
 /// This function takes in the weights w_i along with the station coordinates and calculates H_i(t)
+/// This doesn't necessarily need to be parallelized because this is done per coherence chunk, which is parallelized.
+/// Thus, no further delegation is necessary (likely).
 fn dark_photon_auxiliary_values(
     weights_n: &DashMap<StationName, f32>,
     weights_e: &DashMap<StationName, f32>,
@@ -1336,6 +1468,47 @@ pub struct Power<T: Num + Clone> {
     start_sec: usize,
     end_sec: usize,
 }
+
+#[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Copy, Clone, Debug)]
+pub enum Triplet {
+    Low,
+    Mid,
+    High,
+}
+
+// #[derive(Serialize, Deserialize, Clone, Copy)]
+// pub struct Triplet<T: Num + Clone> {
+//     low: SinglePower<T>,
+//     mid: SinglePower<T>,
+//     high: SinglePower<T>, 
+//     window: usize,
+// }
+// impl<T: Num + Clone + Debug> std::ops::AddAssign for Triplet<T>
+// where
+//     Complex<T>: std::ops::AddAssign
+// {
+//     fn add_assign(&mut self, rhs: Self) {
+//         assert_eq!(self.window, rhs.window, "invalid window for Triplet add_assign");
+//         self.low += rhs.low;
+//         self.mid += rhs.mid;
+//         self.high += rhs.high;
+//     }
+// }
+// impl<T: Num + Clone + Debug> std::ops::AddAssign for SinglePower<T>
+// where
+//     Complex<T>: std::ops::AddAssign
+// {
+//     fn add_assign(&mut self, rhs: Self) {
+//         assert_eq!(self.frequency, rhs.frequency, "invalid frequency for Triplet add_assign");
+//         self.power += rhs.power;
+//     }
+// }
+
+// #[derive(Serialize, Deserialize, Clone, Copy)]
+// pub struct SinglePower<T: Num + Clone> {
+//     power: Complex<T>,
+//     frequency: T,
+// }
 
 impl<T: Float> Power<T> {
     pub fn map<'a, B, F>(&'a self, f: F) -> Power<T>
