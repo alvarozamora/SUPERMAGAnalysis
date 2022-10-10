@@ -1286,11 +1286,9 @@ impl Theory for DarkPhoton {
                             .par_iter()
                             .map(|kv3| {
                                 let (triplet, five_by_five_array) = kv3.pair();
-                                // log::info!("inverting {coherence_time}, {window}, {triplet:?}");
                                 (
                                     *triplet,
                                     five_by_five_array
-                                        .map(|x| x.to_f64().unwrap())
                                         .inv()
                                         .map(|x| { 
                                             // log::info!("Successful inversion");
@@ -1298,7 +1296,7 @@ impl Theory for DarkPhoton {
                                             x 
                                         })
                                         .map_err(|e| {
-                                            log::error!("Unsuccessful inversion");
+                                            // log::error!("Unsuccessful inversion");
                                             fail_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                                             e 
                                         })//.expect("unable to invert matrix")
