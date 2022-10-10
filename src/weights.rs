@@ -352,7 +352,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     debug_print!("local_hashmap_n has {} entries", local_hashmap_n.len());
                     debug_print!("local_hashmap_n has {} entries", local_hashmap_n.len());
                     // e.g. all stations have nans for all values for this chunk
-                    if local_hashmap_n.len() < 0*T::MIN_STATIONS { 
+                    if local_hashmap_n.len() < T::MIN_STATIONS { 
                         println!("Invalid chunk, as there are less than {} stations with data in this chunk. Proceeding to next chunk", T::MIN_STATIONS);
                         return ()
                     } else if local_wn.iter().any(|&x| x == 0.0_f32) {
