@@ -14,11 +14,11 @@ fn main() {
     let coherence = Coherence::Days(1);
 
     // Which subset of the data to use
-    // let days_to_use = DATA_DAYS;//0..(365 * (2020-1998+1) + NUM_LEAP_YEARS);
-    let days_to_use = day_since_first(0, 2004)..day_since_first(0, 2020);
+    let days_to_use = DATA_DAYS;
+    // let days_to_use = day_since_first(0, 2004)..day_since_first(0, 2020);
 
     // Start Balancer
-    let mut balancer = Balancer::new(32, 10);
+    let mut balancer = Balancer::new(32, 5);
 
     // Initialize Theory
     let theory = DarkPhoton::initialize(1.0);
