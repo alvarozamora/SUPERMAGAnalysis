@@ -20,6 +20,7 @@ use num_traits::{ToPrimitive, Float, Num};
 use ndrustfft::Complex;
 use std::f64::consts::PI;
 use std::f32::consts::PI as SINGLE_PI;
+use indicatif::ProgressBar;
 
 const ZERO: Complex<f32> = Complex::new(0.0, 0.0);
 const ONE: Complex<f32> = Complex::new(1.0, 0.0);
@@ -928,11 +929,13 @@ impl Theory for DarkPhoton {
 
         let downtime = 0;
 
-        // for year in 2004..2020 {
+        // Initialize progress bar
+        let initial_spectra_pb = ProgressBar::new(2021-2003);
+        log::info!("Calculating power spectra for stationarity times");
+
         // NOTE: This is hardcoded for stationarity = 1 year
-        // TODO: par iter
-        // (2004..2020).for_each(|year| {
-        (2007..=2007).into_par_iter().for_each(|year| {
+        (2003..2021).into_par_iter().for_each(|year| {
+        // (2007..=2007).into_par_iter().for_each(|year| {
 
             // Get stationarity period indices (place within entire SUPERMAG dataset)
             // NOTE: this definition varies from original implementation. The original
@@ -958,9 +961,9 @@ impl Theory for DarkPhoton {
                 .map(|kv| {
                     // Get element and the complete longest contiguous series
                     let (element, complete_series) = kv.pair();
-                    println!("getting yearly subset {}..={} of complete series with length {}", start_in_series, end_in_series, complete_series.len());
+                    // println!("getting yearly subset {}..={} of complete series with length {}", start_in_series, end_in_series, complete_series.len());
                     let pair = (element.clone(), complete_series.slice(s![start_in_series..=end_in_series]).to_vec());
-                    println!("got yearly subset of complete series");
+                    // println!("got yearly subset of complete series");
                     pair
                 }).collect();
         
@@ -1075,30 +1078,56 @@ impl Theory for DarkPhoton {
             
             // Add along with the rest of the stationarity times
             spectra.insert(year, avg_power);
-            log::info!("Finished calculating power for stationarity_time {year}");
+            // log::info!("Finished calculating power for stationarity_time {year}");
+            initial_spectra_pb.inc(1)
         });
 
+
+        // Initialize progress bar
+        let interpolators_pb = ProgressBar::new(spectra.len() as u64);
+        log::info!("Generating interpolators");
+        
         let power_interpolators: DashMap<_, DashMap<_,_>> = spectra
             .par_iter()
             .map(|kv| {
                 let (stationarity_time, power_map) = kv.pair();
                 (
                     *stationarity_time,
-                    power_map
-                        .par_iter()
-                        .map(|kv_inner| {
-                            let (element_pair, power) = kv_inner.pair();
-                            let power_frequencies: Vec<f32> = power.frequencies();
-                            let power_vec = power.power.to_vec();
-                            (element_pair.clone(), Interp1d::new_unsorted(power_frequencies, power_vec).expect("failed to construct power interpolator"))
-                        }).collect()
+                    { 
+                        let result = power_map
+                            .par_iter()
+                            .map(|kv_inner| {
+                                let (element_pair, power) = kv_inner.pair();
+                                let power_frequencies: Vec<f32> = power.frequencies();
+                                let power_vec = power.power.to_vec();
+                                (element_pair.clone(), Interp1d::new_unsorted(power_frequencies, power_vec).expect("failed to construct power interpolator"))
+                            }).collect();
+                        interpolators_pb.inc(1);
+                        result
+                    }
                 )
             }).collect();
         
-        // TODO stitch spectra together according to coherence times
+        // Initialize progress bar
+        let stitch_pb = ProgressBar::new(set.len() as u64);
+        log::debug!("Stitching spectra; there are {coherence_times} coherence times");
+
+        // Stitch spectra together according to coherence times
         let result = DashMap::with_capacity(coherence_times);
         set
-            .into_par_iter()
+            .into_iter()
+            .for_each(|(coherence_time, frequency_bin)| {
+
+                // First get the domain for the data used
+                let secs = projections_complete.secs();
+                let len_data = secs.len();
+
+                // Then, get each of the coherence chunks
+                let num_chunks = len_data / coherence_time;
+                log::debug!("coherence_time {coherence_time} has {num_chunks} and {} frequencies", frequency_bin.multiples.end()-frequency_bin.multiples.start()+1);
+            });
+        set
+            .into_iter()
             .for_each(|(coherence_time, frequency_bin)| {
 
                 // First get the domain for the data used
@@ -1108,13 +1137,16 @@ impl Theory for DarkPhoton {
                 // Then, get each of the coherence chunks
                 let num_chunks = len_data / coherence_time;
                 
+                
                 // This is the inner chunk map from chunk to coherence time
                 // let inner_chunk_map: DashMap<(NonzeroElement, NonzeroElement), DashMap<usize, Triplet<f32>>> = DashMap::new();
                 // NOTE: work in progress: restructuring to get the 5x5 2d arrays contiuous in memory
                 type Window = usize;
                 let inner_chunk_map: DashMap<Window, DashMap<Triplet, Array2<Complex<f32>>>> = DashMap::new();
 
-                for chunk in 0..num_chunks {
+                (0..num_chunks)
+                    .into_par_iter()
+                    .for_each(|chunk| {
 
                     // Beginning and end index for this chunk in the total series
                     // NOTE: `end` is exclusive
@@ -1133,7 +1165,7 @@ impl Theory for DarkPhoton {
 
                             // Iterate through every element in the 5x5 map
                             power_map
-                                .into_iter()
+                                .into_par_iter()
                                 .for_each(|kv_inner| {
 
                                     // Get element pair and corresponding power
@@ -1186,16 +1218,7 @@ impl Theory for DarkPhoton {
                                                     .unwrap(/* unwrapping for now if out of bounds */)
                                             }).collect();
 
-                                        // // NOTE: leaving this here in case we ever need to use the interpolated power before grouping into triplets.
-                                        // inner_chunk_map
-                                        //     .entry(element_pair.clone())
-                                        //     .and_modify(|p| {
-                                        //         p.add_assign(&(&interpolated_power).mul(overlap as f32))
-                                        //     })
-                                        //     .or_insert(Power { power: interpolated_power.mul(overlap as f32), start_sec: chunk_start, end_sec: chunk_end });
-
                                         // Get all relevant triplets and multiply them by their overlap weight
-                                        // let relevant_triplets: Vec<Triplet<f32>> = interpolated_power
                                         interpolated_power
                                             .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
                                             .into_iter()
@@ -1203,9 +1226,9 @@ impl Theory for DarkPhoton {
                                             .for_each(|(i, window)| {
 
                                                 // Get triplet
-                                                let low = window[0_usize].mul(overlap as f32);
-                                                let mid = window[approx_sidereal].mul(overlap as f32);
-                                                let high =  window[2*approx_sidereal].mul(overlap as f32);
+                                                let low: Complex<f32> = window[0_usize].mul(overlap as f32);
+                                                let mid: Complex<f32> = window[approx_sidereal].mul(overlap as f32);
+                                                let high: Complex<f32> =  window[2*approx_sidereal].mul(overlap as f32);
                                                 
                                                 // The element indices start at 1 so subtract 1
                                                 // i.e. (X1, X2, X3, X4, X5) -> (0, 1, 2, 3, 4)
@@ -1261,19 +1284,40 @@ impl Theory for DarkPhoton {
                                     }
                             });
                         });
-                }
+                });
                 // Insert inner chunk containing this coherence time's power spectrum
                 result
                     .insert(*coherence_time, inner_chunk_map);
-                log::info!("Finished calculating power for coherence_time {coherence_time}");
+                // log::info!("Finished calculating power for coherence_time {coherence_time}");
+                stitch_pb.inc(1)
             });
+
+
 
         // work in progress: let's try inverting
         use ndarray_linalg::solve::Inverse;
         let success_counter = std::sync::atomic::AtomicU32::new(0);
         let fail_counter = std::sync::atomic::AtomicU32::new(0);
         let timer = std::time::Instant::now();
+        let num_inversion_to_do = std::sync::atomic::AtomicU32::new(0);
+        result
+            .par_iter()
+            .for_each(|kv| {
+                let window_map = kv.value();
+                window_map
+                    .par_iter()
+                    .for_each(|kv2| {
+                        let triplet_map = kv2.value();
+                        triplet_map
+                            .par_iter()
+                            .for_each(|_| { num_inversion_to_do.fetch_add(1, std::sync::atomic::Ordering::Relaxed); });
+                    });
+            });
+
+        // Initialize progress bar
+        let inversion_pb = ProgressBar::new(set.len() as u64);
         log::info!("Starting matrix inversions");
+
         let inversions: DashMap<usize, DashMap<usize, DashMap<Triplet, _>>> = result
             .par_iter()
             .map(|kv| {
@@ -1293,11 +1337,13 @@ impl Theory for DarkPhoton {
                                         .map(|x| { 
                                             // log::info!("Successful inversion");
                                             success_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                            inversion_pb.inc(1);
                                             x 
                                         })
                                         .map_err(|e| {
                                             // log::error!("Unsuccessful inversion");
                                             fail_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                            inversion_pb.inc(1);
                                             e 
                                         })//.expect("unable to invert matrix")
                                 )
