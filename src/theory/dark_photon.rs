@@ -28,6 +28,10 @@ const ONE: Complex<f32> = Complex::new(1.0, 0.0);
 /// Size of chunks (used for noise spectra ffts)
 const TAU: usize = 16384 * 64;
 
+type Window = usize;
+pub type InnerVarChunkWindowMap = DashMap<Window, DashMap<Triplet, Array2<Complex<f32>>>>;
+
+
 type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
 #[derive(Clone)]
 pub struct DarkPhoton {
@@ -133,7 +137,7 @@ impl Theory for DarkPhoton {
 
     type AuxiliaryValue = DarkPhotonAuxiliary;
     type Mu = DarkPhotonMu;
-    type Var = DashMap<usize, DashMap<Triplet, Array2<Complex<f32>>>>;
+    type Var = InnerVarChunkWindowMap;
 
     fn get_nonzero_elements() -> HashSet<NonzeroElement> {
 
@@ -921,8 +925,7 @@ impl Theory for DarkPhoton {
         days: Range<usize>,
         stationarity: Stationarity,
         auxiliary_values: Arc<Self::AuxiliaryValue>,
-    ) -> DashMap<usize, Self::Var> {
-        
+    ) -> Result<DiskDB> {
         // Map of Map of Vars
         // key is stationary time chunk (e.g. year)
         let spectra = DashMap::with_capacity(coherence_times);
@@ -1113,7 +1116,6 @@ impl Theory for DarkPhoton {
         log::debug!("Stitching spectra; there are {coherence_times} coherence times");
 
         // Stitch spectra together according to coherence times
-        let result = DashMap::with_capacity(coherence_times);
         set
             .into_iter()
             .for_each(|(coherence_time, frequency_bin)| {
@@ -1126,6 +1128,8 @@ impl Theory for DarkPhoton {
                 let num_chunks = len_data / coherence_time;
                 log::debug!("coherence_time {coherence_time} has {num_chunks} and {} frequencies", frequency_bin.multiples.end()-frequency_bin.multiples.start()+1);
             });
+        let disk_db = DiskDB::connect("./sigma/")
+            .expect("failed to open sigma db");
         set
             .into_iter()
             .for_each(|(coherence_time, frequency_bin)| {
@@ -1141,8 +1145,7 @@ impl Theory for DarkPhoton {
                 // This is the inner chunk map from chunk to coherence time
                 // let inner_chunk_map: DashMap<(NonzeroElement, NonzeroElement), DashMap<usize, Triplet<f32>>> = DashMap::new();
                 // NOTE: work in progress: restructuring to get the 5x5 2d arrays contiuous in memory
-                type Window = usize;
-                let inner_chunk_map: DashMap<Window, DashMap<Triplet, Array2<Complex<f32>>>> = DashMap::new();
+                let inner_chunk_map: InnerVarChunkWindowMap = DashMap::new();
 
                 (0..num_chunks)
                     .into_par_iter()
@@ -1286,8 +1289,12 @@ impl Theory for DarkPhoton {
                         });
                 });
                 // Insert inner chunk containing this coherence time's power spectrum
-                result
-                    .insert(*coherence_time, inner_chunk_map);
+                // result
+                //     .insert(*coherence_time, inner_chunk_map);
+                // now we are just inserting into db
+                disk_db
+                    .insert_windows(*coherence_time, &inner_chunk_map);
+
                 // log::info!("Finished calculating power for coherence_time {coherence_time}");
                 stitch_pb.inc(1)
             });
@@ -1300,10 +1307,13 @@ impl Theory for DarkPhoton {
         let fail_counter = std::sync::atomic::AtomicU32::new(0);
         let timer = std::time::Instant::now();
         let num_inversion_to_do = std::sync::atomic::AtomicU32::new(0);
-        result
-            .par_iter()
-            .for_each(|kv| {
-                let window_map = kv.value();
+        set
+            .into_iter()
+            .for_each(|(coherence_time, _)| {
+                let window_map = disk_db
+                    .get_windows(*coherence_time)
+                    .expect("failed to get window map")
+                    .expect("window map not present in db");
                 window_map
                     .par_iter()
                     .for_each(|kv2| {
@@ -1318,10 +1328,13 @@ impl Theory for DarkPhoton {
         let inversion_pb = ProgressBar::new(set.len() as u64);
         log::info!("Starting matrix inversions");
 
-        let inversions: DashMap<usize, DashMap<usize, DashMap<Triplet, _>>> = result
-            .par_iter()
-            .map(|kv| {
-                let (coherence_time, window_map) = kv.pair();
+        let inversions: DashMap<usize, DashMap<usize, DashMap<Triplet, _>>> = set
+            .into_iter()
+            .map(|(coherence_time, _)| {
+                let window_map = disk_db
+                    .get_windows(*coherence_time)
+                    .expect("failed to get window map")
+                    .expect("window map not present in db");
                 (*coherence_time, window_map
                     .par_iter()
                     .map(|kv2| {
@@ -1358,7 +1371,7 @@ impl Theory for DarkPhoton {
             fail_counter.load(std::sync::atomic::Ordering::SeqCst),
         );
 
-        result
+        Ok(disk_db)
     }
 }
 

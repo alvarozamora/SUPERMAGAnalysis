@@ -14,6 +14,7 @@ use std::ops::Range;
 use num_complex::Complex;
 use ndarray::Array1;
 use special::Gamma;
+use crate::utils::io::{DiskDB, Result};
 use crate::weights::{Stationarity, ProjectionsComplete};
 use crate::{
     utils::{
@@ -121,7 +122,8 @@ pub trait Theory: Send + Debug {
         days: Range<usize>,
         stationarity: Stationarity,
         auxiliary_values: Arc<Self::AuxiliaryValue>,
-    ) -> DashMap<usize, Self::Var>;
+    ) ->Result<DiskDB>;
+    // ) -> DashMap<usize, Self::Var>;
 }
 
 
