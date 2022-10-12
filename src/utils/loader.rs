@@ -288,6 +288,8 @@ pub struct Chunk {
 /// to load those chunks.
 pub struct DatasetLoader {
     pub coordinate_map: Arc<HashMap<StationName, Coordinates>>,
+    /// A semivalid chunk is a set of days for which there exists a data file. It is semi-valid because
+    /// (at the very least) the data file exists, but the data file may still contain NaNs and thus be invalid.
     pub semivalid_chunks: Arc<DashMap<Index, Vec<Chunk>>>,
     days: Range<usize>,
     chunk_size_in_days: usize,
