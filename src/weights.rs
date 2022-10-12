@@ -279,7 +279,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         // };
 
         let days_per_chunk = match coherence {
-            Coherence::Days(days) => days,
+            Coherence::Days(num_days_per_chunk) => num_days_per_chunk,
             Coherence::Yearly => todo!(),
         };
 
@@ -355,7 +355,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     if local_hashmap_n.len() < T::MIN_STATIONS { 
                         println!("Invalid chunk, as there are less than {} stations with data in this chunk. Proceeding to next chunk", T::MIN_STATIONS);
                         return ()
-                    } else if local_wn.iter().any(|&x| x == 0.0_f32) {
+                    } else if local_wn.iter().any(|&x| x == 0.0) {
                         println!("Invalid chunk, as there is at least one time slot with a normalization weight of 0.0");
                         return ()
                     }
@@ -1061,8 +1061,8 @@ async fn calculate_weights_for_chunk(
             }
 
             // Calculate weights (NOTE: these were swapped at some point due to a typo idenitified in the paper)
-            let n_weight: f32 = (clean_field_2.dot(&clean_field_1) / num_samples as f32).recip();
-            let e_weight: f32 = (clean_field_1.dot(&clean_field_2) / num_samples as f32).recip();
+            let n_weight: f32 = (clean_field_2.dot(&clean_field_2) / num_samples as f32).recip();
+            let e_weight: f32 = (clean_field_1.dot(&clean_field_1) / num_samples as f32).recip();
 
             let wn_weight: TimeSeries = valid_entries_1.map(|&is_valid| if is_valid { n_weight } else { 0.0 });
             let we_weight: TimeSeries = valid_entries_2.map(|&is_valid| if is_valid { e_weight } else { 0.0 });
