@@ -1116,20 +1116,9 @@ impl Theory for DarkPhoton {
         log::debug!("Stitching spectra; there are {coherence_times} coherence times");
 
         // Stitch spectra together according to coherence times
-        set
-            .into_iter()
-            .for_each(|(coherence_time, frequency_bin)| {
-
-                // First get the domain for the data used
-                let secs = projections_complete.secs();
-                let len_data = secs.len();
-
-                // Then, get each of the coherence chunks
-                let num_chunks = len_data / coherence_time;
-                log::debug!("coherence_time {coherence_time} has {num_chunks} and {} frequencies", frequency_bin.multiples.end()-frequency_bin.multiples.start()+1);
-            });
         let disk_db = DiskDB::connect("./sigma/")
             .expect("failed to open sigma db");
+        let triplet_counter = std::sync::atomic::AtomicU32::new(0);
         set
             .into_iter()
             .for_each(|(coherence_time, frequency_bin)| {
@@ -1260,6 +1249,10 @@ impl Theory for DarkPhoton {
                                                             .and_modify(|five_by_five_array| { five_by_five_array[[ix, iy]] += low; })
                                                             .or_insert_with(|| { panic!("should already be initialized in or_insert_with below"); });
                                                     }).or_insert_with(|| {
+
+                                                        // TODO: remove after debugging
+                                                        triplet_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
                                                         // Calculate the triplet of arrays with the first entry
                                                         let low_array =  {
                                                             let mut zero_array = Array2::zeros((5,5));
@@ -1293,11 +1286,15 @@ impl Theory for DarkPhoton {
                 //     .insert(*coherence_time, inner_chunk_map);
                 // now we are just inserting into db
                 disk_db
-                    .insert_windows(*coherence_time, &inner_chunk_map);
+                    .insert_windows(*coherence_time, &inner_chunk_map)
+                    .expect("sigma insertion failed");
 
                 // log::info!("Finished calculating power for coherence_time {coherence_time}");
                 stitch_pb.inc(1)
             });
+
+        let triplet_count = triplet_counter.load(std::sync::atomic::Ordering::Acquire);
+        log::debug!("initialized {} triplets -> {} total arrays", triplet_count, 3 * triplet_count);
 
 
 
@@ -1328,42 +1325,45 @@ impl Theory for DarkPhoton {
         let inversion_pb = ProgressBar::new(set.len() as u64);
         log::info!("Starting matrix inversions");
 
-        let inversions: DashMap<usize, DashMap<usize, DashMap<Triplet, _>>> = set
+        // let inversions: DashMap<usize, DashMap<usize, DashMap<Triplet, _>>> = 
+        let sigma_inv_db = DiskDB::connect("./sigma_inv/").unwrap();
+        set
             .into_iter()
-            .map(|(coherence_time, _)| {
+            .for_each(|(coherence_time, _)| {
                 let window_map = disk_db
                     .get_windows(*coherence_time)
                     .expect("failed to get window map")
                     .expect("window map not present in db");
-                (*coherence_time, window_map
-                    .par_iter()
-                    .map(|kv2| {
-                        let (window, triplet_map) = kv2.pair();
-                        (*window, triplet_map
-                            .par_iter()
-                            .map(|kv3| {
-                                let (triplet, five_by_five_array) = kv3.pair();
-                                (
-                                    *triplet,
-                                    five_by_five_array
-                                        .inv()
-                                        .map(|x| { 
-                                            // log::info!("Successful inversion");
-                                            success_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                            inversion_pb.inc(1);
-                                            x 
-                                        })
-                                        .map_err(|e| {
-                                            // log::error!("Unsuccessful inversion");
-                                            fail_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                            inversion_pb.inc(1);
-                                            e 
-                                        })//.expect("unable to invert matrix")
-                                )
-                            }).collect())
-                    }).collect())
-            }).collect();
-        dbg!(inversions.len());
+                sigma_inv_db
+                    .insert_windows(*coherence_time, &window_map
+                        .par_iter()
+                        .map(|kv2| {
+                            let (window, triplet_map) = kv2.pair();
+                            (*window, triplet_map
+                                .par_iter()
+                                .map(|kv3| {
+                                    let (triplet, five_by_five_array) = kv3.pair();
+                                    (
+                                        *triplet,
+                                        five_by_five_array
+                                            .inv()
+                                            .map(|x| { 
+                                                // log::info!("Successful inversion");
+                                                success_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                                inversion_pb.inc(1);
+                                                x 
+                                            })
+                                            .map_err(|e| {
+                                                // log::error!("Unsuccessful inversion");
+                                                fail_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                                inversion_pb.inc(1);
+                                                e 
+                                            }).expect("unable to invert matrix")
+                                    )
+                                }).collect())
+                        }).collect()).expect("insertion failed");
+            });
+        // dbg!(inversions.len());
         log::info!(
             "Completed matrix inversions in {} millis. Did a total of {} successul inversions and {} unsuccessful inversions",
             timer.elapsed().as_millis().to_formatted_string(&Locale::en),
