@@ -64,7 +64,7 @@ async fn test_connect_add_change() {
         .expect("connection to db failed");
 
     // Add
-    disk_db.insert_windows(0, &dashmap::DashMap::new());
+    disk_db.insert_windows(0, &dashmap::DashMap::new()).unwrap();
     assert_eq!(
         disk_db
             .get_windows(0)
@@ -83,7 +83,7 @@ async fn test_connect_add_change() {
                 [(Triplet::Low, ndarray::Array2::zeros((1,1)))].into_iter().collect()
             )
         ].into_iter().collect()
-    );
+    ).unwrap();
     assert_eq!(
         disk_db
             .get_windows(0)
