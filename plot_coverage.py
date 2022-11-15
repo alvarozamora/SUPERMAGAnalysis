@@ -26,7 +26,7 @@ plt.savefig("coverage.png")
 
 
 
-# Open days with data
+# Open secs with data
 filename = "secs_with_data"
 file = open(filename, "rb")
 
