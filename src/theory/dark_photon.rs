@@ -1,7 +1,6 @@
 use super::*;
-use std::{collections::HashMap, ops::{Range, Sub, AddAssign}};
-use dashmap::DashMap;
-use interp::interp;
+use std::{collections::HashMap};
+use dashmap::{DashMap, mapref::one::Ref};
 use interp1d::Interp1d;
 use itertools::Itertools;
 use num_format::{ToFormattedString, Locale};
@@ -12,15 +11,20 @@ use crate::{utils::{
     loader::Dataset,
     approximate_sidereal, coordinates::Coordinates, fft::get_frequency_range_1s,
 }, constants::{SIDEREAL_DAY_SECONDS}, weights::in_longest_subset};
-use std::ops::{Mul, Div, Add};
-use ndrustfft::{FftHandler, ndfft};
+use std::{
+    ops::{Mul, Div, Add, Range, Sub, AddAssign},
+};
+use ndrustfft::{FftHandler, ndfft, Zero};
 use rayon::prelude::*;
-use ndarray::{s, ScalarOperand, Array2};
+use ndarray::{s, ScalarOperand, Array2, array, Axis};
 use num_traits::{ToPrimitive, Float, Num};
 use ndrustfft::Complex;
+use std::sync::atomic::{Ordering, AtomicU32};
 use std::f64::consts::PI;
 use std::f32::consts::PI as SINGLE_PI;
 use indicatif::ProgressBar;
+use ndarray_linalg::{Cholesky, solve::Inverse, UPLO, SVD};
+
 
 const ZERO: Complex<f32> = Complex::new(0.0, 0.0);
 const ONE: Complex<f32> = Complex::new(1.0, 0.0);
@@ -29,7 +33,8 @@ const ONE: Complex<f32> = Complex::new(1.0, 0.0);
 const TAU: usize = 16384 * 64;
 
 type Window = usize;
-pub type InnerVarChunkWindowMap = DashMap<Window, DashMap<Triplet, Array2<Complex<f32>>>>;
+pub type InnerVarChunkWindowMap = DashMap<Window, Triplet>;
+pub type InnerAChunkWindowMap = DashMap<Window, DashMap<Triplet, (Array2<Complex<f32>>,  Array2<Complex<f32>>)>>;
 
 
 type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
@@ -90,9 +95,10 @@ impl DarkPhoton {
 
         // Calculate vec_sphs at each station
         // let vec_sph_fns = Arc::new(vector_spherical_harmonics(DARK_PHOTON_MODES.clone().into_boxed_slice()));
+
+
         // Manual override to remove prefactors
         let vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>> = Arc::new(DashMap::new());
-
         vec_sph_fns.insert(
             DARK_PHOTON_NONZERO_ELEMENTS[0].clone(),
             Arc::new(|_theta: f32, phi: f32| -> f32 {
@@ -138,6 +144,8 @@ impl Theory for DarkPhoton {
     type AuxiliaryValue = DarkPhotonAuxiliary;
     type Mu = DarkPhotonMu;
     type Var = InnerVarChunkWindowMap;
+    // type DataVector = DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>>;
+    type DataVector = DashMap<usize /* Tc */, DashMap<usize /* chunk */, DashMap<usize /* window/triplet */, DarkPhotonVec<f64>>>>;
 
     fn get_nonzero_elements() -> HashSet<NonzeroElement> {
 
@@ -151,6 +159,7 @@ impl Theory for DarkPhoton {
 
         nonzero_elements
     }
+
     fn calculate_projections(
         &self,
         weights_n: &DashMap<StationName, f32>,
@@ -195,6 +204,7 @@ impl Theory for DarkPhoton {
                             //     Component::AzimuthImag =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[1].im,
                             //     _ => panic!("not included in dark photon"),
                             // };
+
                             // Manual Override
                             let relevant_vec_sph = vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32);
 
@@ -242,17 +252,26 @@ impl Theory for DarkPhoton {
         &self,
         projections_complete: &ProjectionsComplete,
         local_set: &Vec<(usize, FrequencyBin)>,
-    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> {
+    ) -> Self::DataVector {
 
         // Parallelize local_set on this rank
-        let data_vector_dashmap: DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>> = DashMap::new();
+        let data_vector_dashmap = DashMap::new();
+
+        // Local references
+        let dp1 = DARK_PHOTON_NONZERO_ELEMENTS[0].clone();
+        let dp2 = DARK_PHOTON_NONZERO_ELEMENTS[1].clone();
+        let dp3 = DARK_PHOTON_NONZERO_ELEMENTS[2].clone();
+        let dp4 = DARK_PHOTON_NONZERO_ELEMENTS[3].clone();
+        let dp5 = DARK_PHOTON_NONZERO_ELEMENTS[4].clone();
 
         local_set
             .par_iter()
             .for_each(|(coherence_time /* usize */, frequency_bin /* FrequencyBin */)| {
                 
                 // This holds the result for a single coherence time
-                let inner_dashmap: DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>> = DashMap::new();
+                // The usize is the window index. 
+                // The array1 holds all (15 x 1) data vectors for all frequency triplets for that window
+                let inner_dashmap: DashMap<usize /* chunk_index */, DashMap<usize /* window_index */, DarkPhotonVec<f64>>> = DashMap::new();
 
                 // Parallelize over all nonzero elements in the theory
                 projections_complete
@@ -294,23 +313,154 @@ impl Theory for DarkPhoton {
                         log::debug!("relevant_range is {start_relevant}..={end_relevant}");
                         let relevant_values = fft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range));
 
-                        // Get all relevant triplets
-                        let relevant_triplets: Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)> = relevant_values
+                        // Get all relevant triplets -- KEEP THIS HERE FOR NOW
+                        // let relevant_triplets: Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)> = relevant_values
+                        //     .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
+                        //     .into_iter()
+                        //     .map(|window| 
+                        //         (
+                        //             // NOTE: technically this might be an expensive clone, but it is likely okay.
+                        //             window.slice(s![0_usize, ..]).to_owned(),
+                        //             window.slice(s![approx_sidereal, ..]).to_owned(),
+                        //             window.slice(s![2*approx_sidereal, ..]).to_owned(),
+                        //         )).collect();
+
+                        relevant_values
                             .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
                             .into_iter()
-                            .map(|window| 
-                                (
-                                    // NOTE: technically this might be an expensive clone, but it is likely okay.
-                                    window.slice(s![0_usize, ..]).to_owned(),
-                                    window.slice(s![approx_sidereal, ..]).to_owned(),
-                                    window.slice(s![2*approx_sidereal, ..]).to_owned(),
-                                )).collect();
+                            .enumerate()
+                            .for_each(|(window_index, window)|{
 
-                        // Insert relevant triplets into the inner dashmap
-                        assert!(inner_map
-                            .insert(element.clone(), relevant_triplets).is_none(), "Somehow a duplicate entry was made");
+                                // These have shape 1 x num_chunks
+                                let low = window.slice(s![0_usize, ..]).to_owned();
+                                let mid = window.slice(s![approx_sidereal, ..]).to_owned();
+                                let high = window.slice(s![2*approx_sidereal, ..]).to_owned();
+
+                                for chunk_index in 0..low.len() {
+                                    inner_map
+                                        .entry(chunk_index)
+                                        .and_modify(|window_map| {
+
+                                            window_map
+                                                .entry(window_index)
+                                                .and_modify(|inner_data_vector| {
+                                                    match element {
+                                                        e if e == &dp1 => {
+                                                            inner_data_vector.low[0] += low[chunk_index];
+                                                            inner_data_vector.mid[0] += mid[chunk_index];
+                                                            inner_data_vector.high[0] += high[chunk_index];
+                                                        },
+                                                        e if e == &dp2 => {
+                                                            inner_data_vector.low[1] += low[chunk_index];
+                                                            inner_data_vector.mid[1] += mid[chunk_index];
+                                                            inner_data_vector.high[1] += high[chunk_index];
+                                                        },
+                                                        e if e == &dp3 => {
+                                                            inner_data_vector.low[2] += low[chunk_index];
+                                                            inner_data_vector.mid[2] += mid[chunk_index];
+                                                            inner_data_vector.high[2] += high[chunk_index];
+                                                        },
+                                                        e if e == &dp4 => {
+                                                            inner_data_vector.low[3] += low[chunk_index];
+                                                            inner_data_vector.mid[3] += mid[chunk_index];
+                                                            inner_data_vector.high[3] += high[chunk_index];
+                                                        },
+                                                        e if e == &dp5 => {
+                                                            inner_data_vector.low[4] += low[chunk_index];
+                                                            inner_data_vector.mid[4] += mid[chunk_index];
+                                                            inner_data_vector.high[4] += high[chunk_index];
+                                                        },
+                                                        _ => unreachable!("dark photon only has these 5 nonzero elements"),
+                                                    };
+                                                })
+                                                .or_insert_with(|| {
+                                                    // Initialize with zeros and metadata
+                                                    let mut inner_data_vector = DarkPhotonVec {
+                                                        low: [0.0.into(); 5].into_iter().collect(),
+                                                        mid: [0.0.into(); 5].into_iter().collect(),
+                                                        high: [0.0.into(); 5].into_iter().collect(),
+                                                        coh_time: *coherence_time,
+                                                        window: window_index,
+                                                        chunk: chunk_index,
+                                                    };
+
+                                                    match element {
+                                                        e if e == &dp1 => {
+                                                            inner_data_vector.low[0] += low[chunk_index];
+                                                            inner_data_vector.mid[0] += mid[chunk_index];
+                                                            inner_data_vector.high[0] += high[chunk_index];
+                                                        },
+                                                        e if e == &dp2 => {
+                                                            inner_data_vector.low[1] += low[chunk_index];
+                                                            inner_data_vector.mid[1] += mid[chunk_index];
+                                                            inner_data_vector.high[1] += high[chunk_index];
+                                                        },
+                                                        e if e == &dp3 => {
+                                                            inner_data_vector.low[2] += low[chunk_index];
+                                                            inner_data_vector.mid[2] += mid[chunk_index];
+                                                            inner_data_vector.high[2] += high[chunk_index];
+                                                        },
+                                                        e if e == &dp4 => {
+                                                            inner_data_vector.low[3] += low[chunk_index];
+                                                            inner_data_vector.mid[3] += mid[chunk_index];
+                                                            inner_data_vector.high[3] += high[chunk_index];
+                                                        },
+                                                        e if e == &dp5 => {
+                                                            inner_data_vector.low[4] += low[chunk_index];
+                                                            inner_data_vector.mid[4] += mid[chunk_index];
+                                                            inner_data_vector.high[4] += high[chunk_index];
+                                                        },
+                                                        _ => unreachable!("dark photon only has these 5 nonzero elements"),
+                                                    };
+                                                    inner_data_vector
+                                                });
+
+                                        }).or_insert_with(|| {
+                                            let empty_map = DashMap::new();
+                                            let mut inner_data_vector = DarkPhotonVec {
+                                                low: [0.0.into(); 5].into_iter().collect(),
+                                                    mid: [0.0.into(); 5].into_iter().collect(),
+                                                    high: [0.0.into(); 5].into_iter().collect(),
+                                                coh_time: *coherence_time,
+                                                window: window_index,
+                                                chunk: chunk_index,
+                                            };
+                                            match element {
+                                                e if e == &dp1 => {
+                                                    inner_data_vector.low[0] += low[chunk_index];
+                                                    inner_data_vector.mid[0] += mid[chunk_index];
+                                                    inner_data_vector.high[0] += high[chunk_index];
+                                                },
+                                                e if e == &dp2 => {
+                                                    inner_data_vector.low[1] += low[chunk_index];
+                                                    inner_data_vector.mid[1] += mid[chunk_index];
+                                                    inner_data_vector.high[1] += high[chunk_index];
+                                                },
+                                                e if e == &dp3 => {
+                                                    inner_data_vector.low[2] += low[chunk_index];
+                                                    inner_data_vector.mid[2] += mid[chunk_index];
+                                                    inner_data_vector.high[2] += high[chunk_index];
+                                                },
+                                                e if e == &dp4 => {
+                                                    inner_data_vector.low[3] += low[chunk_index];
+                                                    inner_data_vector.mid[3] += mid[chunk_index];
+                                                    inner_data_vector.high[3] += high[chunk_index];
+                                                },
+                                                e if e == &dp5 => {
+                                                    inner_data_vector.low[4] += low[chunk_index];
+                                                    inner_data_vector.mid[4] += mid[chunk_index];
+                                                    inner_data_vector.high[4] += high[chunk_index];
+                                                },
+                                                _ => unreachable!("only 5 nonzero elements"),
+                                            };
+                                            empty_map.insert(window_index, inner_data_vector);
+                                            empty_map
+                                        });
+                                }
+                            });
                     });
 
+                // Insert inner map
                 assert!(data_vector_dashmap
                     .insert(*coherence_time, inner_dashmap).is_none(), "Somehow a duplicate entry was made");
             });
@@ -335,7 +485,7 @@ impl Theory for DarkPhoton {
 
         // Map of Map of mus
         // First key is coherence time
-        // Second key is chunk time
+        // Second key is chunk index
         let result = DashMap::with_capacity(coherence_times);
 
         log::trace!("starting loop for {} coherence times", set.len());
@@ -369,6 +519,7 @@ impl Theory for DarkPhoton {
                     // Note: when you encounter a chunk that has total time < coherence time, the s![start..end] below will truncate it.
                     // TODO: check phase
                     // TODO: check f32 precision
+                    // TODO: shorthand Complex with const I
                     // let cis_fh_f = Array1::range(0.0, *coherence_time as f32, 1.0)
                     let cis_fh_f = (start..end)
                         .map(|x| Complex { re: x as f32, im: 0.0 })
@@ -1118,7 +1269,7 @@ impl Theory for DarkPhoton {
         // Stitch spectra together according to coherence times
         let disk_db = DiskDB::connect("./sigma/")
             .expect("failed to open sigma db");
-        let triplet_counter = std::sync::atomic::AtomicU32::new(0);
+        let triplet_counter = AtomicU32::new(0);
         set
             .into_iter()
             .for_each(|(coherence_time, frequency_bin)| {
@@ -1199,14 +1350,14 @@ impl Theory for DarkPhoton {
                                             .map(|i| i as f32 * frequency_bin.lower as f32)
                                             .collect();
                                         let interpolated_power: Array1<Complex<f32>> = frequencies_to_interpolate_to
-                                            .into_iter()
+                                            .iter()
                                             .map(|f| {
                                                 power_interpolators
                                                     .get(&stationarity_time)
                                                     .expect("interpolator should exist for this stationarity time")
                                                     .get(element_pair)
                                                     .expect("interpolator should exist for this element pair")
-                                                    .interpolate_checked(f)
+                                                    .interpolate_checked(*f)
                                                     .unwrap(/* unwrapping for now if out of bounds */)
                                             }).collect();
 
@@ -1215,12 +1366,17 @@ impl Theory for DarkPhoton {
                                             .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
                                             .into_iter()
                                             .enumerate()
-                                            .for_each(|(i, window)| {
+                                            .for_each(|(window_index, window)| {
 
                                                 // Get triplet
                                                 let low: Complex<f32> = window[0_usize].mul(overlap as f32);
                                                 let mid: Complex<f32> = window[approx_sidereal].mul(overlap as f32);
                                                 let high: Complex<f32> =  window[2*approx_sidereal].mul(overlap as f32);
+
+                                                // get frequencies
+                                                let lowf: f32 = frequencies_to_interpolate_to[window_index];
+                                                let midf: f32 = frequencies_to_interpolate_to[window_index + approx_sidereal];
+                                                let hif: f32 = frequencies_to_interpolate_to[window_index + 2*approx_sidereal];
                                                 
                                                 // The element indices start at 1 so subtract 1
                                                 // i.e. (X1, X2, X3, X4, X5) -> (0, 1, 2, 3, 4)
@@ -1228,30 +1384,21 @@ impl Theory for DarkPhoton {
 
                                                 // Add/store triplet
                                                 inner_chunk_map
-                                                    .entry(i)
-                                                    .and_modify(|triplet_map| {
+                                                    .entry(window_index)
+                                                    .and_modify(|triplet| {
 
                                                         // First, add to low triplet matrix (fa-fdhat)
-                                                        triplet_map
-                                                            .entry(Triplet::Low)
-                                                            .and_modify(|five_by_five_array| { five_by_five_array[[ix, iy]] += low; })
-                                                            .or_insert_with(|| { panic!("should already be initialized in or_insert_with below"); });
+                                                        triplet.low[[ix, iy]] += low;
 
                                                         // Then, add to mid triplet matrix (fa)
-                                                        triplet_map
-                                                            .entry(Triplet::Mid)
-                                                            .and_modify(|five_by_five_array| { five_by_five_array[[ix, iy]] += mid; })
-                                                            .or_insert_with(|| { panic!("should already be initialized in or_insert_with below"); });
+                                                        triplet.mid[[ix, iy]] += mid;
 
                                                         // Finally, add to hi triplet matrix (fa+fdhat)
-                                                        triplet_map
-                                                            .entry(Triplet::High)
-                                                            .and_modify(|five_by_five_array| { five_by_five_array[[ix, iy]] += low; })
-                                                            .or_insert_with(|| { panic!("should already be initialized in or_insert_with below"); });
+                                                        triplet.high[[ix, iy]] += high;
                                                     }).or_insert_with(|| {
 
                                                         // TODO: remove after debugging
-                                                        triplet_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                                        triplet_counter.fetch_add(1, Ordering::Relaxed);
 
                                                         // Calculate the triplet of arrays with the first entry
                                                         let low_array =  {
@@ -1269,12 +1416,19 @@ impl Theory for DarkPhoton {
                                                                 zero_array[[ix, iy]] = high;
                                                                 zero_array
                                                         };
-                                                        // Package and initialize map
-                                                        [
-                                                            (Triplet::Low, low_array),
-                                                            (Triplet::Mid, mid_array),
-                                                            (Triplet::High, high_array),
-                                                        ].into_iter().collect()
+
+                                                        // Package and initialize triplet
+                                                        Triplet {
+                                                            low: low_array,
+                                                            mid: mid_array,
+                                                            high: high_array,
+                                                            lowf: lowf,
+                                                            midf: midf,
+                                                            hif: hif,
+                                                            coh_time: *coherence_time,
+                                                            chunk: chunk,
+                                                            window: Some(window_index),
+                                                        }
                                                     });
                                             });
                                     }
@@ -1296,84 +1450,349 @@ impl Theory for DarkPhoton {
         let triplet_count = triplet_counter.load(std::sync::atomic::Ordering::Acquire);
         log::debug!("initialized {} triplets -> {} total arrays", triplet_count, 3 * triplet_count);
 
-
-
-        // work in progress: let's try inverting
-        use ndarray_linalg::solve::Inverse;
-        let success_counter = std::sync::atomic::AtomicU32::new(0);
-        let fail_counter = std::sync::atomic::AtomicU32::new(0);
-        let timer = std::time::Instant::now();
-        let num_inversion_to_do = std::sync::atomic::AtomicU32::new(0);
-        set
-            .into_iter()
-            .for_each(|(coherence_time, _)| {
-                let window_map = disk_db
-                    .get_windows(*coherence_time)
-                    .expect("failed to get window map")
-                    .expect("window map not present in db");
-                window_map
-                    .par_iter()
-                    .for_each(|kv2| {
-                        let triplet_map = kv2.value();
-                        triplet_map
-                            .par_iter()
-                            .for_each(|_| { num_inversion_to_do.fetch_add(1, std::sync::atomic::Ordering::Relaxed); });
-                    });
-            });
-
-        // Initialize progress bar
-        let inversion_pb = ProgressBar::new(set.len() as u64);
-        log::info!("Starting matrix inversions");
-
-        // let inversions: DashMap<usize, DashMap<usize, DashMap<Triplet, _>>> = 
-        let sigma_inv_db = DiskDB::connect("./sigma_inv/").unwrap();
-        set
-            .into_iter()
-            .for_each(|(coherence_time, _)| {
-                let window_map = disk_db
-                    .get_windows(*coherence_time)
-                    .expect("failed to get window map")
-                    .expect("window map not present in db");
-                sigma_inv_db
-                    .insert_windows(*coherence_time, &window_map
-                        .par_iter()
-                        .map(|kv2| {
-                            let (window, triplet_map) = kv2.pair();
-                            (*window, triplet_map
-                                .par_iter()
-                                .map(|kv3| {
-                                    let (triplet, five_by_five_array) = kv3.pair();
-                                    (
-                                        *triplet,
-                                        five_by_five_array
-                                            .inv()
-                                            .map(|x| { 
-                                                // log::info!("Successful inversion");
-                                                success_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                                inversion_pb.inc(1);
-                                                x 
-                                            })
-                                            .map_err(|e| {
-                                                // log::error!("Unsuccessful inversion");
-                                                fail_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                                inversion_pb.inc(1);
-                                                e 
-                                            }).expect("unable to invert matrix")
-                                    )
-                                }).collect())
-                        }).collect()).expect("insertion failed");
-            });
-        // dbg!(inversions.len());
-        log::info!(
-            "Completed matrix inversions in {} millis. Did a total of {} successul inversions and {} unsuccessful inversions",
-            timer.elapsed().as_millis().to_formatted_string(&Locale::en),
-            success_counter.load(std::sync::atomic::Ordering::SeqCst),
-            fail_counter.load(std::sync::atomic::Ordering::SeqCst),
-        );
-
         Ok(disk_db)
     }
+
+    /// The process is
+    /// 1) Carry out Cholesky decomoposition on Sigma_k = A_k * Adag_k, obtaining A_k
+    /// 2) Invert A_k, obtaining Ainv_k
+    /// 3) Calculate Y_k = Ainv_k * X_k
+    /// 4) Calculate nu_ik = Ainv_k * mu_ik
+    /// 5) SVD into Nk = nu_ik -> U_k * S_k * Vdag_k, obtaining U_k
+    /// 6) Calculate Zk = Udag_k * Y_k
+    /// 7) Calculate likelihood -ln Lk = |Z_k - eps * S_k * d_k|^2
+    fn calculate_likelihood(
+        &self,
+        set: &Vec<(usize, FrequencyBin)>,
+        projections_complete: &ProjectionsComplete,
+        data_vector: &Self::DataVector,
+        theory_mean: &DashMap<usize, DashMap<usize, DarkPhotonMu>>,
+        coherence_times: usize,
+        days: Range<usize>,
+        stationarity: Stationarity,
+        auxiliary_values: Arc<Self::AuxiliaryValue>,
+    ) -> DashMap<usize, f64> {
+
+        // Load sigma
+        let sigma_db = DiskDB::connect("./sigma/")
+            .expect("database should exist by this stage");
+
+        // Initialize database where A_k and Ainv_k is stored
+        // let a_db = DiskDB::connect("./a/").unwrap();
+        // let ak_db = DiskDB::connect("./ak/").unwrap();
+
+        // Get number of seconds in the continguous subset of dataset
+        let num_secs = projections_complete.num_secs();
+        
+        let sz2_coherence: DashMap<_, _> = set
+            .into_iter()
+            .map(|(coherence_time, frequency_bin)| {
+
+                // Get number of chunks for this coherence time
+                let num_chunks = num_secs / coherence_time;
+
+                // Get theory mean for this coherence time
+                let theory_mean_ct = theory_mean
+                    .get(&coherence_time)
+                    .expect("theory mean should exist for every coherence time here");
+
+                // Get data vector component for coherence time
+                let data_vector_ct = data_vector
+                    .get(&coherence_time)
+                    .expect("data vector should exist for every coherence time here");
+
+                // For this coherence time, get the map to every triplet window (for sigma)
+                let window_map = sigma_db
+                    .get_windows(*coherence_time)
+                    .expect("failed to get window map")
+                    .expect("window map not present in db");
+
+                // // Step 1 and 2: calculate inverse of A_k
+                let ainv = window_map
+                    .par_iter()
+                    .map(|kv2| {
+                        let (window, triplet) = kv2.pair();
+                        (*window, triplet.block_cholesky().block_inv())
+                        }).collect::<DashMap<_,_>>();
+
+                let sz2_map = DashMap::new();
+                for chunk in 0..num_chunks {
+
+                    // Get data vector for this chunk,
+                    let data_vector_chunk = data_vector_ct
+                    .get(&chunk)
+                    .expect("data vector should exist for every chunk");
+
+                    // Step 3: Calculate Y_k = Ainv_k * X_k for all windows in this chunk
+                    let y: DashMap<Window, DarkPhotonVec<f32>> = ainv
+                        .par_iter()
+                        .map(|kv2| {
+                            // Get triplet window and corresponding map
+                            let (window, ainv_triplet) = kv2.pair();
+                            
+                            // Get data vector for this window
+                            let data_vector_window = data_vector_chunk
+                                .get(&window)
+                                .expect("data vector should exist for every window");
+                            
+                            // (window, Ainv * Xk_)
+                            (*window, ainv_triplet.dot_vec(&*data_vector_window))
+                            }).collect::<DashMap<_,DarkPhotonVec<f32>>>();
+
+                    // Step 4: Calculate nu_ik = Ainv_k * mu_ik
+                    let nu = ainv
+                        .par_iter()
+                        .map(|kv2| {
+                            // Get triplet window and corresponding map
+                            let (window, ainv_triplet) = kv2.pair();
+
+                            // Get theory mean for this chunk,
+                            // scaled by the window's frequency
+                            let scale_frequency = ainv_triplet.midf;
+                            let theory_mean_chunk_scaled: DarkPhotonMuBlock = theory_mean_ct
+                                .get(&chunk)
+                                .expect("this coherence time should exist")
+                                .scale(scale_frequency)
+                                .to_blocks();
+                            
+                            // ainv is 15x15 and consists of 5x5 blocks.
+                            // Mean should be 15x3, split into blocks here.
+                            // matmul should result in a 15x3 matrix, but they are blocked into 5x3 chunks.
+                            let three_blocks = ainv_triplet.mat_mul([theory_mean_chunk_scaled.block1, theory_mean_chunk_scaled.block2, theory_mean_chunk_scaled.block3]);
+                            assert_eq!(three_blocks.low.shape(), &[5, 3]);
+                            assert_eq!(three_blocks.mid.shape(), &[5, 3]);
+                            assert_eq!(three_blocks.high.shape(), &[5, 3]);
+
+                            // We take these 5x3 blocks and assemble a 15x3 matrix
+                            let mut nu: Array2<Complex<f32>> = Array2::from_shape_fn((15, 3), |(i, j)| { 
+                                match i {
+                                    _i if _i < 5 => three_blocks.low[[i, j]],
+                                    _i if _i < 10 => three_blocks.mid[[i-5, j]],
+                                    _i if _i < 15 => three_blocks.high[[i-10, j]],
+                                    _ => unreachable!("should not reach this"),
+                                }
+                            });
+                            assert_eq!(nu.shape(), &[15, 3]);
+
+                            // Return nu with window as the key
+                            (*window, nu)
+                        }).collect::<DashMap<_, Array2<Complex<f32>>>>();
+
+                    // Step 5: Calculate svd of Nik
+                    // Step 6: Calculate Zk = Udag_k * Y_k
+                    // This gets us s and z2
+                    let sz2 = nu
+                        .into_par_iter()
+                        .map(|(window, nu_window)| {
+                            // Step 5: Carry out svd
+                            // nu is a 15x3 matrix
+                            // u should be 15x3, S should be 3x3, and v should be 3x3.
+                            let (Some(u), s, Some(v)) = nu_window.svd(true, true).expect("svd failed") else {
+                                panic!("u and v are being requested but were not given ")
+                            };
+                            assert_eq!(u.shape(), &[15, 3], "svd: u does not have correct shape");
+                            assert_eq!(s.shape(), &[3], "svd: s does not have correct shape");
+                            assert_eq!(v.shape(), &[3, 3], "svd: v does not have correct shape");
+
+                            // Conjugate and transpose v and u
+                            let vdag = v.t().map(|c| c.conj());
+                            let udag = u.t().map(|c| c.conj());
+                            assert_eq!(vdag.shape(), &[3, 3], "congj t: vdag does not have correct shape");
+                            assert_eq!(udag.shape(), &[3, 15], "congj t: udag does not have correct shape");
+                            
+                            // Step 6: Zk = Udag_k * Y_k
+                            let y_k = y.get(&window).expect("yk should exist for this window").to_vec();
+                            assert_eq!(y_k.shape(), &[15]);
+                            let z = udag.dot(&y_k);
+                            assert_eq!(z.shape(), &[3]);
+
+                            (window, (s, z))
+                        }).collect::<DashMap<_, _>>();
+
+                    // Insert into sz map
+                    sz2_map.insert(chunk, sz2.into_read_only());
+                }
+                // Return sz map
+                (coherence_time, (frequency_bin, sz2_map.into_read_only()))
+            }).collect();
+
+            let sz2_coherence = sz2_coherence.into_read_only();
+
+            // Use SZ to calculate bounds
+            let freqs_and_bounds: Vec<(f32, f32)> = sz2_coherence
+                .into_par_iter()
+                .map(|(coherence_time, (frequency_bin, sz_chunk_map))| {
+
+                    // Total number of chunks for this coherence time
+                    let num_chunks = num_secs / coherence_time;
+
+                    // let bounds = vec![];
+                    let approx_sidereal: usize = approximate_sidereal(frequency_bin);
+                    let num_fft_elements = *coherence_time;
+                    if num_fft_elements < 2*approx_sidereal + 1 {
+                        println!("no triplets exist");
+                    }
+                    let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
+                    let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
+                    let relevant_range = start_relevant..=end_relevant;
+                    log::debug!("relevant_range is {start_relevant}..={end_relevant}");
+                    let window_indices: Vec<usize> = relevant_range
+                        .into_iter()
+                        .enumerate()
+                        .map(|(window_index, _)| window_index)
+                        .collect();
+                    
+                    // Now that we have all the window indices,
+                    // for each of them collect all chunks and calculate bound
+                    let mut bounds = Vec::with_capacity(window_indices.len());
+                    for window in window_indices {
+                        // Initialize vec to hold references to sz pairs for this frequency/window
+                        let mut sz_references = Vec::<&(Array1<f32>, Array1<Complex<f32>>)>::with_capacity(num_chunks);
+                        for chunk in 0..num_chunks {
+                            sz_references.push(sz_chunk_map
+                                .get(&chunk)
+                                .expect("chunk should exist")
+                                .get(&window)
+                                .expect("window should exist")
+                            );
+                        }
+
+                        let frequency = window as f64 * frequency_bin.lower;
+                        bounds.push((frequency as f32, bound(*coherence_time, window, &sz_references)));
+                    }
+
+                    // TODO
+                    bounds
+                }).flatten().collect();
+
+                    
+
+
+        DashMap::new()
+
+    }
 }
+
+
+/// Calculates the bound for a particular (coherence_time, chunk, window)
+fn bound(
+    coherence_time: usize,
+    window: usize,
+    // This collects all z and s that have the same frequency
+    sz: &[&(Array1<f32>, Array1<Complex<f32>>)],
+) -> f32 {
+
+    let normalization: f32 = 1.0;
+    // The pdf is of the form N * sqrt(sum(...)) * prod(a exp(b))
+    // so we will break down logpdf into summands 
+    // 1) log N
+    // 2) log sqrt(sum(...))
+    // 3) log sum(a)
+    // 4) log sum(b)
+    let logpdf = |norm: f32, eps: f32| {
+        // Term 1: logarithm of normalization factor
+        let term_1: f32 = normalization.ln();
+
+        // Term 2: logarithm of square root of sum, from jeffery's prior
+        let term_2: f32 = sz.iter().map(|(si, _zi)| {
+            si.iter().map(|sik| {
+                (4.0 * eps.powi(2) * sik.powi(4)) / (3.0 + eps.powi(2) * sik.powi(2)).powi(2)
+            }).sum::<f32>()
+        }).sum::<f32>().sqrt().ln();
+
+        // Term 3: log sum(a)
+        let term_3: f32 = sz.iter().map(|(si, _zi)| {
+            si.iter().map(|sik| {
+                ((3.0 + eps.powi(2) * sik.powi(2)).powi(2)).ln()
+            }).sum::<f32>()
+        }).sum();
+
+
+        // Term 4: log(a)
+        let term_4: f32 = {
+            let mut acc = 0.0_f32;
+            for j in 0..sz.len() {
+                let (sj, zj) = sz[j];
+                for i in 0..3 {
+                    acc += 3.0 * zj[i].norm_sqr() / (3.0 + eps.powi(2) * sj[i].powi(2));
+                }
+            }
+            acc
+        };
+
+        // Add all terms
+        term_1 + term_2 + term_3 + term_4
+    };
+
+    // Find where logeps is maximum in -20, 20
+    // TODO: refactor into DarkPhoton: Theory
+    // TODO: change for this dataset
+    let min_log_eps = -20.0;
+    let max_log_eps = 20.0;
+    let num_eps = 1000;
+    let log_eps_grid: Vec<f32> = (0..num_eps).map(|i| min_log_eps + i as f32 * (max_log_eps-min_log_eps) / num_eps.sub(1) as f32).collect();
+    let (max_logp, max_logp_eps) = log_eps_grid
+        .iter()
+        .map(|&log_eps| (log_eps, logpdf(1.0, 10_f32.powf(log_eps)))) // (logeps, logpdf)
+        .max_by(|a,b| a.1.partial_cmp(&b.1).unwrap()) // find max logpdf
+        .unwrap();
+    log::debug!("found max_logp {max_logp:.2e} at logeps {max_logp_eps:.2e}");
+
+    // Transform pdf(x) to pdf(y) via 
+    // pdf(y) = pdf(x(y)) |dx(y)/dy| 
+    //        = pdf(exp(logeps)) * exp(logeps) 
+    // i.e. for 
+    // x = eps
+    // y = logeps
+    // x(y) = exp(y)  ---> eps(logeps) = exp(logeps)
+    // dx(y)/dy = d/dy exp(y) = exp(y) ---> exp(logeps)
+    //
+    // The integration library used below expects double precision...
+    let transformed_unnormalized_pdf = |logeps: f64| {
+        logpdf(1.0, logeps.exp() as f32) as f64 * logeps.exp()
+    };
+
+    // Now, integrate function from -20 to 20, letting integrator figure it out
+    let normalization = quadrature::clenshaw_curtis::integrate(transformed_unnormalized_pdf, -20.0, 20.0, 1e-6).integral;
+    let mut dlogeps = 1.0;
+    let mut upper_bound = -10.0;
+    let mut converged = false;
+    let mut last_status = 0u8;
+    const ABOVE: u8 = 1;
+    const BELOW: u8 = 2;
+    while !converged {
+        let current_integral = quadrature::clenshaw_curtis::integrate(transformed_unnormalized_pdf, -20.0, upper_bound, 1e-6).integral;
+        let i = current_integral / normalization;
+        if i.abs() < 1e-6 {
+            // If within tolerance we are converged
+            converged = true;
+        } else if i > 0.95 {
+            // Else, if above target decrease upper_bound
+            // First check if we crossed target
+            if last_status == BELOW {
+                // we have skipped over target, so reduce delta
+                dlogeps /= 10.0;
+
+            }
+            upper_bound -= dlogeps;
+            last_status = ABOVE;
+        } else if i < 0.95 {
+            // Else, if below target increase upper_bound
+            // First check if we crossed target
+            if last_status == BELOW {
+                // we have skipped over target, so reduce delta
+                dlogeps /= 10.0;
+
+            }
+            upper_bound += dlogeps;
+            last_status = BELOW;
+        }
+    }
+
+    // Upper bound is for logeps so exponentiate to get exp bound
+    upper_bound.exp() as f32
+}
+
 
 #[derive(Default, Serialize, Deserialize)]
 pub struct DarkPhotonMu {
@@ -1383,6 +1802,142 @@ pub struct DarkPhotonMu {
     pub y: [Complex<f32>; 15],
     // #[serde(with = "ComplexDef")]
     pub z: [Complex<f32>; 15],
+}
+
+#[derive(Default, Serialize, Deserialize)]
+/// Note: these should all have length = 5
+pub struct DarkPhotonVec<T: Num + Clone> {
+    pub low: Array1<Complex<T>>,
+    pub mid:  Array1<Complex<T>>,
+    pub high:  Array1<Complex<T>>,
+    // utility variables for assertions
+    coh_time: usize,
+    chunk: usize,
+    window: usize,
+}
+
+impl<T: Num + Clone> DarkPhotonVec<T> {
+    fn to_vec(&self) -> Array1<Complex<T>> {
+        ndarray::concatenate![Axis(0), self.low, self.mid, self.high]
+    }
+}
+
+#[derive(Default, Serialize, Deserialize, Debug, PartialEq)]
+struct DarkPhotonMuBlock {
+    block1: Array2<Complex<f32>>,
+    block2: Array2<Complex<f32>>,
+    block3: Array2<Complex<f32>>,
+}
+
+const DARK_PHOTON_MU_SHAPE: (usize, usize) = (15, 3);
+
+impl DarkPhotonMu {
+    /// produces a 15 x 3 matrix out of the x, y, z components
+    fn to_matrix(&self) -> Array2<Complex<f32>> {
+        Array2::from_shape_fn(
+            DARK_PHOTON_MU_SHAPE,
+            |(j, i)| {
+                match i {
+                    0 => self.x[j],
+                    1 => self.y[j],
+                    2 => self.z[j],
+                    _ => unreachable!("only three components")
+                }
+            }
+        )
+        
+    }
+    /// produces three 5 x 3 matrices out of the x, y, z components
+    fn to_blocks(&self) -> DarkPhotonMuBlock {
+        let block1 = Array2::from_shape_fn(
+            (5, 3),
+            |(j, i)| {
+                match i {
+                    0 => self.x[j],
+                    1 => self.y[j],
+                    2 => self.z[j],
+                    _ => unreachable!("only three components")
+                }
+            }
+        );
+        let block2 = Array2::from_shape_fn(
+            (5, 3),
+            |(j, i)| {
+                match i {
+                    0 => self.x[j+5],
+                    1 => self.y[j+5],
+                    2 => self.z[j+5],
+                    _ => unreachable!("only three components")
+                }
+            }
+        );
+        let block3 = Array2::from_shape_fn(
+            (5, 3),
+            |(j, i)| {
+                match i {
+                    0 => self.x[j+10],
+                    1 => self.y[j+10],
+                    2 => self.z[j+10],
+                    _ => unreachable!("only three components")
+                }
+            }
+        );
+        DarkPhotonMuBlock { block1, block2, block3 }
+    }
+
+    fn scale(&self, factor: f32) -> Self {
+        Self {
+            x: (&self.x).map(|entry| entry * factor),
+            y: (&self.y).map(|entry| entry * factor),
+            z: (&self.z).map(|entry| entry * factor),
+        }
+    }
+}
+
+#[test]
+fn test_to_matrix() {
+    let dpmu = DarkPhotonMu {
+        x: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| x.into()),
+        y: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| (-x).into()),
+        z: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x|  I * x),
+    };
+    let matrix: Array2<Complex<f32>> = array![
+        [1.0_f32 * ONE, 2.0 * ONE, 3.0 * ONE, 4.0 * ONE, 5.0 * ONE, 6.0 * ONE, 7.0 * ONE, 8.0 * ONE, 9.0 * ONE, 10.0 * ONE, 11.0 * ONE, 12.0 * ONE, 13.0 * ONE, 14.0 * ONE, 15.0 * ONE],
+        [-1.0_f32 * ONE, -2.0 * ONE, -3.0 * ONE, -4.0 * ONE, -5.0 * ONE, -6.0 * ONE, -7.0 * ONE, -8.0 * ONE, -9.0 * ONE, -10.0 * ONE, -11.0 * ONE, -12.0 * ONE, -13.0 * ONE, -14.0 * ONE, -15.0 * ONE],
+        [1.0_f32 * I, 2.0 * I, 3.0 * I, 4.0 * I, 5.0 * I, 6.0 * I, 7.0 * I, 8.0 * I, 9.0 * I, 10.0 * I, 11.0 * I, 12.0 * I, 13.0 * I, 14.0 * I, 15.0 * I]
+    ];
+    assert_eq!(
+        dpmu.to_matrix(),
+        matrix,
+    );
+}
+
+#[test]
+fn test_to_blocks() {
+    let dpmu = DarkPhotonMu {
+        x: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| x.into()),
+        y: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| (-x).into()),
+        z: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x|  I * x),
+    };
+    let block1: Array2<Complex<f32>> = array![
+        [1.0_f32 * ONE, 2.0 * ONE, 3.0 * ONE, 4.0 * ONE, 5.0 * ONE],
+        [-1.0_f32 * ONE, -2.0 * ONE, -3.0 * ONE, -4.0 * ONE, -5.0 * ONE],
+        [1.0_f32 * I, 2.0 * I, 3.0 * I, 4.0 * I, 5.0 * I]
+    ];
+    let block2: Array2<Complex<f32>> = array![
+        [6.0 * ONE, 7.0 * ONE, 8.0 * ONE, 9.0 * ONE, 10.0 * ONE],
+        [-6.0 * ONE, -7.0 * ONE, -8.0 * ONE, -9.0 * ONE, -10.0 * ONE],
+        [6.0 * I, 7.0 * I, 8.0 * I, 9.0 * I, 10.0 * I]
+    ];
+    let block3: Array2<Complex<f32>> = array![
+        [11.0 * ONE, 12.0 * ONE, 13.0 * ONE, 14.0 * ONE, 15.0 * ONE],
+        [-11.0 * ONE, -12.0 * ONE, -13.0 * ONE, -14.0 * ONE, -15.0 * ONE],
+        [11.0 * I, 12.0 * I, 13.0 * I, 14.0 * I, 15.0 * I]
+    ];
+    assert_eq!(
+        dpmu.to_blocks(),
+        DarkPhotonMuBlock { block1, block2, block3 },
+    );
 }
 
 /// Assumes these are inclusive indices!
@@ -1526,11 +2081,178 @@ pub struct Power<T: Num + Clone> {
     end_sec: usize,
 }
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Hash, Copy, Clone, Debug)]
-pub enum Triplet {
-    Low,
-    Mid,
-    High,
+#[derive(Serialize, Deserialize, PartialEq, Clone, Debug)]
+/// Note: these should all be 5x5 arrays
+pub struct Triplet {
+    pub low: Array2<Complex<f32>>,
+    pub mid: Array2<Complex<f32>>,
+    pub high: Array2<Complex<f32>>,
+    // TODO: add something like this to ensure we are only multiplying the correct frequencies
+    pub lowf: f32,
+    pub midf: f32,
+    pub hif: f32,
+    pub coh_time: usize,
+    pub chunk: usize,
+    pub window: Option<usize>
+}
+
+impl Triplet {
+    fn mat_mul(&self, arrays: [Array2<Complex<f32>>; 3]) -> Triplet {
+        Triplet {
+            low: self.low.dot(&arrays[0]),
+            mid: self.mid.dot(&arrays[1]),
+            high: self.high.dot(&arrays[2]),
+            lowf: self.lowf,
+            midf: self.midf,
+            hif: self.hif,
+            coh_time: self.coh_time,
+            chunk: self.chunk,
+            window: self.window,
+        }
+    }
+    /// Applies the map to every entry in every block
+    fn map<F>(&self, f: F) -> Triplet
+    where
+        F: Fn(&Complex<f32>) -> Complex<f32>
+    {
+        Triplet {
+            low: self.low.map(&f),
+            mid: self.mid.map(&f),
+            high: self.high.map(&f),
+            lowf: self.lowf,
+            midf: self.midf,
+            hif: self.hif,
+            coh_time: self.coh_time,
+            chunk: self.chunk,
+            window: self.window,
+        }
+    }
+    /// This takes the [Triplet] self and multipled a [DarkPhotonVec] to produce another [DarkPhotonVec]
+    /// via matrix multiplication, i.e. A.x = y
+    fn dot_vec(&self, vecs: &DarkPhotonVec<f64>) -> DarkPhotonVec<f32> {
+        DarkPhotonVec {
+            low: self.low.dot(&vecs.low.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
+            mid: self.mid.dot(&vecs.mid.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
+            high: self.high.dot(&vecs.high.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
+            coh_time: vecs.coh_time,
+            window: vecs.window,
+            chunk: vecs.chunk,
+        }
+    }
+    /// This takes the [Triplet] self and multipled a [DarkPhotonVec] to produce another [DarkPhotonVec]
+    /// via matrix multiplication, i.e. A.x = y
+    fn dot_vec_32(&self, vecs: &DarkPhotonVec<f32>) -> DarkPhotonVec<f32> {
+        DarkPhotonVec {
+            low: self.low.dot(&vecs.low),
+            mid: self.mid.dot(&vecs.mid),
+            high: self.high.dot(&vecs.high),
+            coh_time: vecs.coh_time,
+            window: vecs.window,
+            chunk: vecs.chunk,
+        }
+    }
+
+    /// Inverts every block in the triplet, panicking if it failed
+    /// NOTE: The inverse of a block diagonal matrix is equal to a block diagonal 
+    /// matrix with the inverse of the respective blocks. As such, we can do this
+    /// for every triplet element independently.
+    fn block_inv(&self) -> Triplet {
+        Triplet {
+            low: self.low.inv().expect("failed matrix inversion"),
+            mid: self.mid.inv().expect("failed matrix inversion"),
+            high: self.high.inv().expect("failed matrix inversion"),
+            lowf: self.lowf,
+            midf: self.midf,
+            hif: self.hif,
+            coh_time: self.coh_time,
+            chunk: self.chunk,
+            window: self.window,
+        }
+    }
+    /// Performs lower cholesky decomposition on every block in the triplet,
+    /// panicking if it failed.
+    /// NOTE: The cholesky decomposition of a block diagonal matrix is equal to a 
+    /// block diagonal matrix with the cholesky decomposition of the blocks. As such,
+    /// we can do this for every triplet element independently.
+    fn block_cholesky(&self) -> Triplet {
+        Triplet {
+            low: self.low.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
+            mid: self.mid.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
+            high: self.high.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
+            lowf: self.lowf,
+            midf: self.midf,
+            hif: self.hif,
+            coh_time: self.coh_time,
+            chunk: self.chunk,
+            window: self.window,
+        }
+    }
+
+    /// Performs singular value decomposition on every block in the triplet,
+    /// panicking if it failed.
+    /// NOTE: The singular value decomposition of a block diagonal matrix is equal to a 
+    /// block diagonal matrix with the singular value decomposition of the blocks. As such,
+    /// we can do this for every triplet element independently.
+    /// 
+    /// TODO: ensure the middle array is correct (i.e. not transposed)
+    fn block_svd(&self) -> (Triplet, Array2<f32>, Triplet) {
+        let (ulow, slow, vlow) = self.low.svd(true, true).expect("svd failed");
+        let (umid, smid, vmid) = self.mid.svd(true, true).expect("svd failed");
+        let (uhigh, shigh, vhigh) = self.high.svd(true, true).expect("svd failed");
+        (Triplet {
+            low: ulow.expect("requested u"),
+            mid: umid.expect("requested u"),
+            high: uhigh.expect("requested u"),
+            lowf: self.lowf,
+            midf: self.midf,
+            hif: self.hif,
+            coh_time: self.coh_time,
+            chunk: self.chunk,
+            window: self.window,
+        },
+        Array2::from_shape_vec((3, 3), slow.into_iter().chain(smid.into_iter()).chain(shigh.into_iter()).collect()).expect("should be correct shape"),
+        Triplet {
+            low: vlow.expect("requested v"),
+            mid: vmid.expect("requested v"),
+            high: vhigh.expect("requested v"),
+            lowf: self.lowf,
+            midf: self.midf,
+            hif: self.hif,
+            coh_time: self.coh_time,
+            chunk: self.chunk,
+            window: self.window,
+        })
+    }
+
+    /// Tranposes and conjugates every block
+    fn dagger(&self) -> Self {
+        Triplet {
+            low: self.low.t().map(|c| c.conj()),
+            mid: self.mid.t().map(|c| c.conj()),
+            high: self.high.t().map(|c| c.conj()),
+            lowf: self.lowf,
+            midf: self.midf,
+            hif: self.hif,
+            coh_time: self.coh_time,
+            chunk: self.chunk,
+            window: self.window,
+        }
+    }
+
+    /// Scale all blocks by the same scalar factor
+    fn scale(&self, factor: f32) -> Self {
+        Self {
+            low: (&self.low).mul(factor),
+            mid: (&self.mid).mul(factor),
+            high: (&self.high).mul(factor),
+            lowf: self.lowf,
+            midf: self.midf,
+            hif: self.hif,
+            coh_time: self.coh_time,
+            chunk: self.chunk,
+            window: self.window,
+        }
+    }
 }
 
 // #[derive(Serialize, Deserialize, Clone, Copy)]

@@ -1,17 +1,16 @@
+use csv::{ReaderBuilder, StringRecord, Trim};
 use dashmap::DashMap;
 use interp::interp;
-use csv::{ReaderBuilder, StringRecord, Trim};
-use std::io::{self, BufReader, BufRead};
-use std::fs::File;
 use serde_derive::Deserialize;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader};
 
 use crate::constants::SECONDS_PER_DAY;
 
-use super::loader::{StationName, day_since_first};
+use super::loader::{day_since_first, StationName};
 
 type SecFloat = f64;
 type Declination = f64;
-
 
 const IGRF_DATA_FILE: &str = "./src/IGRF_declinations_for_1sec.txt";
 
@@ -25,7 +24,6 @@ const IGRF_DATA_FILE: &str = "./src/IGRF_declinations_for_1sec.txt";
 //     declination: f64,
 // }
 
-
 lazy_static! {
     pub static ref IGRF_DATA_INTERPOLATOR: Declinations = load_igrf_data();
 }
@@ -34,9 +32,7 @@ pub struct Declinations {
     pub inner: DashMap<StationName, (Vec<SecFloat>, Vec<Declination>)>,
 }
 
-
 fn load_igrf_data() -> Declinations {
-
     // Initialize return value
     let inner = DashMap::new();
 
@@ -47,17 +43,18 @@ fn load_igrf_data() -> Declinations {
         .lines()
         .skip(1)
         .map(|line| {
-
             // Iterator over entries in the line
             let line = line.unwrap();
             let mut entries = line.split_whitespace();
 
-            // Construct tuple 
-            (entries.next().unwrap().parse().unwrap(),
-            entries.next().unwrap().to_owned(),
-            entries.next().unwrap().parse().unwrap(),
-            entries.next().unwrap().parse().unwrap(),
-            entries.next().unwrap().parse().unwrap())
+            // Construct tuple
+            (
+                entries.next().unwrap().parse().unwrap(),
+                entries.next().unwrap().to_owned(),
+                entries.next().unwrap().parse().unwrap(),
+                entries.next().unwrap().parse().unwrap(),
+                entries.next().unwrap().parse().unwrap(),
+            )
         })
         .collect();
     //     // .multiunzip();
@@ -76,25 +73,25 @@ fn load_igrf_data() -> Declinations {
     // println!("{other_entries:?}");
 
     for (year, station, _geolat, _geolon, declination) in entries {
-
         inner
             .entry(station)
             .and_modify(|map: &mut (Vec<SecFloat>, Vec<Declination>)| {
                 map.0.push(convert_entry_year_to_sec_float(year));
                 map.1.push(declination);
             })
-            .or_insert((vec![convert_entry_year_to_sec_float(year)], vec![declination]));
+            .or_insert((
+                vec![convert_entry_year_to_sec_float(year)],
+                vec![declination],
+            ));
     }
-
 
     Declinations { inner }
 }
 
-
 impl Declinations {
-
+    /// NOTE: This is presently done very inefficiently (interp),
+    /// but is probably not worth optimizing.
     pub fn interpolate(&self, station: String, sec: usize) -> Declination {
-
         // Get x and y vecs
         let station_data = self.inner.get(&station).unwrap();
 
@@ -105,7 +102,6 @@ impl Declinations {
 
 /// The values given are for the start of the 180th day of each year.
 fn convert_entry_year_to_sec_float(year: usize) -> SecFloat {
-
     // Index day by day since first day of data
     let day: usize = day_since_first(179 /* days start at 0 */, year);
 
@@ -115,10 +111,8 @@ fn convert_entry_year_to_sec_float(year: usize) -> SecFloat {
     sec as SecFloat
 }
 
-
 #[test]
 fn test_convert_entry_year_to_sec_float() {
-
     assert_eq!(
         convert_entry_year_to_sec_float(1998),
         // On the beginning of the 180th day, 179 full days and 1 second have passed
@@ -134,34 +128,32 @@ fn test_convert_entry_year_to_sec_float() {
     assert_eq!(
         convert_entry_year_to_sec_float(2000),
         // On the beginning of the 180th day, 179 full days and 1 second have passed
-        ((179 + 365*2) * SECONDS_PER_DAY + 1) as SecFloat
+        ((179 + 365 * 2) * SECONDS_PER_DAY + 1) as SecFloat
     );
 
     // 2000 was a leap year
     assert_eq!(
         convert_entry_year_to_sec_float(2001),
         // On the beginning of the 180th day, 179 full days and 1 second have passed
-        ((179 + 365*2 + 366) * SECONDS_PER_DAY + 1) as SecFloat
+        ((179 + 365 * 2 + 366) * SECONDS_PER_DAY + 1) as SecFloat
     );
 }
 
-
 #[test]
 fn test_declination_interpolation() {
-
     /*
      * IGRF_declinations_for_1sec.txt
-     * 
+     *
      * year   IAGA     geolat      geolon    declination
      * 1998   SON       25.12       66.44        0.34
      * ..
      * 1999   SON       25.12       66.44        0.36
      * ..
-     * 
+     *
      */
 
-    let sec_1998: usize  = 179 * SECONDS_PER_DAY + 1;
-    let sec_1999: usize  = (179 + 365) * SECONDS_PER_DAY + 1;
+    let sec_1998: usize = 179 * SECONDS_PER_DAY + 1;
+    let sec_1999: usize = (179 + 365) * SECONDS_PER_DAY + 1;
     let sec_mid = (sec_1998 + sec_1999) / 2;
 
     // Check left

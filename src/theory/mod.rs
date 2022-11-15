@@ -1,28 +1,24 @@
 /// This module contains both the trait `Theory` required for a theory,
 /// e.g. a dark photon, but also the functions that produce expected signals.
-
 pub mod dark_photon;
 
-use serde::de::DeserializeOwned;
-use serde::{Serialize, Deserialize};
-use sphrs::{ComplexSHType, Coordinates as SphrsCoordinates, SHEval};
-use dashmap::DashMap;
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-use std::fmt::Debug;
-use std::ops::Range;
-use num_complex::Complex;
-use ndarray::Array1;
-use special::Gamma;
 use crate::utils::io::{DiskDB, Result};
-use crate::weights::{Stationarity, ProjectionsComplete};
+use crate::weights::{ProjectionsComplete, Stationarity};
 use crate::{
-    utils::{
-        coordinates::construct_coordinate_map,
-        loader::Dataset,
-    },
+    utils::{coordinates::construct_coordinate_map, loader::Dataset},
     weights::FrequencyBin,
 };
+use dashmap::DashMap;
+use ndarray::Array1;
+use num_complex::Complex;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use special::Gamma;
+use sphrs::{ComplexSHType, Coordinates as SphrsCoordinates, SHEval};
+use std::collections::{HashMap, HashSet};
+use std::fmt::Debug;
+use std::ops::Range;
+use std::sync::Arc;
 
 const NULL: f32 = 0.0;
 const I: Complex<f32> = Complex::new(0.0, 1.0);
@@ -45,7 +41,6 @@ pub type Frequency = f32;
 pub type FrequencyIndex = usize;
 pub type DFTValue = Complex<f32>;
 
-
 pub trait FromChunkMap: Sized {
     fn from_chunk_map(
         chunk_map: &DashMap<usize, Self>,
@@ -56,7 +51,6 @@ pub trait FromChunkMap: Sized {
 }
 
 pub trait Theory: Send + Debug {
-
     // const MODES: Modes;
     const NONZERO_ELEMENTS: usize;
     const MIN_STATIONS: usize;
@@ -67,6 +61,7 @@ pub trait Theory: Send + Debug {
     // Theory Average and Variance (Noise Spectra)
     type Mu: Serialize + DeserializeOwned + Send + Sync;
     type Var: Serialize + DeserializeOwned + Send + Sync;
+    type DataVector: Serialize + DeserializeOwned + Send + Sync;
 
     /// Gets nonzero elements for the theory.
     fn get_nonzero_elements() -> HashSet<NonzeroElement>;
@@ -82,7 +77,7 @@ pub trait Theory: Send + Debug {
         chunk_dataset: &DashMap<StationName, Dataset>,
     ) -> DashMap<NonzeroElement, TimeSeries>;
 
-    /// If a theory requires it, as does the dark photon one, this is where 
+    /// If a theory requires it, as does the dark photon one, this is where
     /// any auxiliary values are calculated while the raw data is loaded in memory.
     fn calculate_auxiliary_values(
         &self,
@@ -95,12 +90,11 @@ pub trait Theory: Send + Debug {
 
     /// Finds X(k) for the relevant frequencies for a given coherence time.
     /// For the dark photon, those are given by triplets, which are presently hard coded.
-    /// TODO: Change the return type to be an associated type for the theory.
     fn calculate_data_vector(
         &self,
         projections_complete: &ProjectionsComplete,
-        local_set: &Vec<(usize, FrequencyBin)>
-    ) -> DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>, Array1<ndrustfft::Complex<f64>>)>>>;
+        local_set: &Vec<(usize, FrequencyBin)>,
+    ) -> Self::DataVector;
 
     /// Calculate mu for the theory. The first key in the map should be the coherence time, and the second key should be which chunk the mean is for.
     fn calculate_mean_theory(
@@ -110,7 +104,6 @@ pub trait Theory: Send + Debug {
         coherence_times: usize,
         auxiliary_values: Arc<Self::AuxiliaryValue>,
     ) -> DashMap<usize, DashMap<usize, Self::Mu>>;
-
 
     /// Calculate the noise spectra for the theory for the different coherence times.
     /// The first key in the map should be the coherence time, and the second key should be which chunk the mean is for.
@@ -122,10 +115,21 @@ pub trait Theory: Send + Debug {
         days: Range<usize>,
         stationarity: Stationarity,
         auxiliary_values: Arc<Self::AuxiliaryValue>,
-    ) ->Result<DiskDB>;
-    // ) -> DashMap<usize, Self::Var>;
-}
+    ) -> Result<DiskDB>;
 
+    /// Calculate the likelihood
+    fn calculate_likelihood(
+        &self,
+        local_set: &Vec<(usize, FrequencyBin)>,
+        projections_complete: &ProjectionsComplete,
+        data_vector: &Self::DataVector,
+        theory_mean: &DashMap<usize, DashMap<usize, Self::Mu>>,
+        coherence_times: usize,
+        days: Range<usize>,
+        stationarity: Stationarity,
+        auxiliary_values: Arc<Self::AuxiliaryValue>,
+    ) -> DashMap<usize, f64>;
+}
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Mode(pub Degree, pub Order);
@@ -152,8 +156,6 @@ pub enum Component {
     AzimuthImag,
 }
 
-
-
 // #[derive(Debug)]
 /// NOTE: I don't know why I wrote this... but keeping it around just in case
 // struct VecSphs<T: IntoIterator<Item=Complex<f32>>> {
@@ -174,7 +176,6 @@ pub enum Component {
 //             .map(|&mode| (mode, vector_spherical_harmonic(mode)))
 //             .collect();
 
-            
 //         let vec_sphs: HashMap<StationName, PhiLM> = coordinate_map.iter().map(|(station, coordinates)| {
 
 //             // Unpack coord
@@ -186,7 +187,7 @@ pub enum Component {
 
 //             // Add modes
 //             for (_mode, vec_sph_fn) in mode_fns.iter() {
-                
+
 //                 let phi = vec_sph_fn(theta, phi).phi;
 
 //                 phi_lm[0] += phi[0];
@@ -197,7 +198,6 @@ pub enum Component {
 //             (station.clone(), phi_lm)
 //         }).collect();
 
-
 //         Self {
 //             vec_sphs,
 //             modes
@@ -207,10 +207,9 @@ pub enum Component {
 
 #[derive(Debug)]
 pub struct VecSph {
-
     // This is Y_lm * r_hat. Only the non-zero component is returned (radial).
     pub y: Complex<f32>,
-    
+
     // This is |vec(r)| * grad(Y_lm). Only the nonzero components are returned (angular components)
     pub psi: [Complex<f32>; 2],
 
@@ -218,10 +217,8 @@ pub struct VecSph {
     pub phi: [Complex<f32>; 2],
 }
 
-
 /// This returns a lookup table of vector spherical harmonic functions for a given set of modes.
 pub fn vector_spherical_harmonics(modes: Box<[Mode]>) -> DashMap<Mode, VecSphFn> {
-
     // Initialize return value
     let hashmap = DashMap::new();
 
@@ -235,40 +232,33 @@ pub fn vector_spherical_harmonics(modes: Box<[Mode]>) -> DashMap<Mode, VecSphFn>
 
 /// Given a mode, this function returns a VecSphFn which is a function f(theta, phi) -> Complex<f32>
 pub fn vector_spherical_harmonic(mode: Mode) -> VecSphFn {
-
     // Unpack mode
     let Mode(l, m) = mode;
 
     // Construct and Box function
-    Arc::new(
-        move |theta: Theta, phi: Phi| -> VecSph {
+    Arc::new(move |theta: Theta, phi: Phi| -> VecSph {
+        // Set up spherical harmonic calculation
+        let sh = ComplexSHType::Spherical;
+        let p: SphrsCoordinates<f32> = SphrsCoordinates::spherical(NULL, theta, phi);
 
-            // Set up spherical harmonic calculation
-            let sh = ComplexSHType::Spherical;
-            let p: SphrsCoordinates<f32> = SphrsCoordinates::spherical(NULL, theta, phi);
+        // Calculate Y_lm
+        let y = sh.eval(l, m, &p);
 
-            // Calculate Y_lm
-            let y = sh.eval(l, m, &p);
-        
-            // Calculate components of psi_lm and phi_lm
-            let a = (m as f32) * theta.tan().recip() * y 
-                + (sqrt(gamma((1 + l - m) as f32)) * sqrt(gamma((2 + l + m) as f32)) * sh.eval(l, m + 1, &p))
-                    / ((I*phi).exp()*sqrt(gamma((l - m) as f32))*sqrt(gamma((1 + l + m) as f32)));
-            let b = I * m as f32 * theta.sin().recip() * y;
-            
-            // Consruct psi_lm and phi_lm
-            let psi = [ a, b];
-            let phi = [-b, a];
+        // Calculate components of psi_lm and phi_lm
+        let a = (m as f32) * theta.tan().recip() * y
+            + (sqrt(gamma((1 + l - m) as f32))
+                * sqrt(gamma((2 + l + m) as f32))
+                * sh.eval(l, m + 1, &p))
+                / ((I * phi).exp() * sqrt(gamma((l - m) as f32)) * sqrt(gamma((1 + l + m) as f32)));
+        let b = I * m as f32 * theta.sin().recip() * y;
 
-            VecSph {
-                y,
-                psi,
-                phi,
-            }
-        }
-    )
+        // Consruct psi_lm and phi_lm
+        let psi = [a, b];
+        let phi = [-b, a];
+
+        VecSph { y, psi, phi }
+    })
 }
-
 
 fn gamma(x: f32) -> f32 {
     x.gamma()

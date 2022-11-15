@@ -109,6 +109,10 @@ impl ProjectionsComplete {
         assert_eq!(secs.end - secs.start, self.projections_complete.iter().next().unwrap().value().len());
         secs
     }
+    /// Returns the number of seconds in the first series, which should be the same for all series
+    pub fn num_secs(&self) -> usize {
+        self.secs().len()
+    }
 }
 
 

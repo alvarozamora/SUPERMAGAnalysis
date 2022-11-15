@@ -1,3 +1,4 @@
 
 [ ] Redo plot, zooming in on 2 or three different months
 [ ] determine which is the last day with less than 3 stations using the day-by-day data.
+[ ] convert all f32s to f64s (maybe)
