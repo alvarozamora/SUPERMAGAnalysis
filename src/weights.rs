@@ -371,7 +371,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     let chunk_projections: DashMap<NonzeroElement, TimeSeries> = local_theory
                         .calculate_projections(
                             &local_hashmap_n,
-                            &local_hashmap_n,
+                            &local_hashmap_e,
                             &local_wn,
                             &local_we,
                             &datasets
@@ -379,7 +379,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     let chunk_auxiliary = local_theory
                         .calculate_auxiliary_values(
                             &local_hashmap_n,
-                            &local_hashmap_n,
+                            &local_hashmap_e,
                             &local_wn,
                             &local_we,
                             &datasets
