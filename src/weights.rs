@@ -1066,9 +1066,9 @@ async fn calculate_weights_for_chunk(
                 );
             }
 
-            // Calculate weights (NOTE: these were swapped at some point due to a typo idenitified in the paper)
-            let n_weight: f32 = (clean_field_2.dot(&clean_field_2) / num_samples as f32).recip();
-            let e_weight: f32 = (clean_field_1.dot(&clean_field_1) / num_samples as f32).recip();
+            // Calculate weights
+            let n_weight: f32 = (clean_field_1.dot(&clean_field_1) / num_samples as f32).recip();
+            let e_weight: f32 = (clean_field_2.dot(&clean_field_2) / num_samples as f32).recip();
 
             let wn_weight: TimeSeries = valid_entries_1.map(|&is_valid| if is_valid { n_weight } else { 0.0 });
             let we_weight: TimeSeries = valid_entries_2.map(|&is_valid| if is_valid { e_weight } else { 0.0 });
