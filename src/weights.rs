@@ -1014,10 +1014,12 @@ async fn calculate_weights_for_chunk(
             }
 
             // Clean the fields and find valid entries
+            // NOTE: field_2 is flipped here to be negative because polar unit vector points south,
+            // i.e. B_polar = -B_north
             let (valid_entries_1, clean_field_1): (Array1<bool>, TimeSeries) = {
                 let (entries, field): (Vec<bool>, Vec<f32>) = dataset.field_1
                     .iter()
-                    .map(|&x| if x != SUPERMAG_NAN { (true, x) } else { (false, 0.0) })
+                    .map(|&x| if x != SUPERMAG_NAN { (true, -x) } else { (false, 0.0) })
                     .unzip();
                 (Array1::from_vec(entries), Array1::from_vec(field)) 
             };
