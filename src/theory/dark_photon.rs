@@ -314,18 +314,6 @@ impl Theory for DarkPhoton {
                         log::debug!("relevant_range is {start_relevant}..={end_relevant}");
                         let relevant_values = fft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range));
 
-                        // Get all relevant triplets -- KEEP THIS HERE FOR NOW
-                        // let relevant_triplets: Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)> = relevant_values
-                        //     .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
-                        //     .into_iter()
-                        //     .map(|window| 
-                        //         (
-                        //             // NOTE: technically this might be an expensive clone, but it is likely okay.
-                        //             window.slice(s![0_usize, ..]).to_owned(),
-                        //             window.slice(s![approx_sidereal, ..]).to_owned(),
-                        //             window.slice(s![2*approx_sidereal, ..]).to_owned(),
-                        //         )).collect();
-
                         relevant_values
                             .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
                             .into_iter()
