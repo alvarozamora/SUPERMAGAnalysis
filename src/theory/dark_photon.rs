@@ -283,6 +283,7 @@ impl Theory for DarkPhoton {
                         let (element, series) = series.pair();
 
                         // Calculate number of exact chunks, and the total size of all exact chunks
+                        // TODO: include last chunk via f64 --> ceiling
                         let exact_chunks: usize = series.len() / coherence_time;
                         let exact_chunks_size: usize = exact_chunks * coherence_time;
 
