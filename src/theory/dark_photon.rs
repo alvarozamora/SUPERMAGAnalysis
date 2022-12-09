@@ -1939,43 +1939,6 @@ fn calculate_overlap(
         .unwrap_or(0)
 }
 
-// #[derive(Serialize, Deserialize)]
-// #[serde(remote = "Complex")]
-// pub struct ComplexDef<T>
-// {
-//     re: T,
-//     im: T,
-// }
-
-// impl serde::Serialize for DarkPhotonMu {
-//     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-//     where
-//         S: serde::Serializer,
-//     {
-//         (
-//             &self.x.map(|x| (x.re, x.im)),
-//             &self.y.map(|y| (y.re, y.im)),
-//             &self.z.map(|z| (z.re, z.im)),
-        
-//         ).serialize(serializer)
-//     }
-// }
-
-// impl<'de> serde::Deserialize<'de> for DarkPhotonMu {
-//     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-//     where
-//         D: serde::Deserializer<'de>,
-//     {
-//         let (x, y, z): ([(f32, f32); 15], [(f32, f32); 15], [(f32, f32); 15]) = serde::Deserialize::deserialize(deserializer)?;
-//         Ok(DarkPhotonMu { 
-//             x: x.map(|(re, im)| Complex::new(re, im)),
-//             y: y.map(|(re, im)| Complex::new(re, im)),
-//             z: z.map(|(re, im)| Complex::new(re, im)),
-//         })
-//     }
-// }
-
-
 /// This function takes in the weights w_i along with the station coordinates and calculates H_i(t)
 /// This doesn't necessarily need to be parallelized because this is done per coherence chunk, which is parallelized.
 /// Thus, no further delegation is necessary (likely).
