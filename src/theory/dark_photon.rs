@@ -335,29 +335,29 @@ impl Theory for DarkPhoton {
                                                 .and_modify(|inner_data_vector| {
                                                     match element {
                                                         e if e == &dp1 => {
-                                                            inner_data_vector.low[0] += low[chunk_index];
-                                                            inner_data_vector.mid[0] += mid[chunk_index];
-                                                            inner_data_vector.high[0] += high[chunk_index];
+                                                            inner_data_vector.low[0] = low[chunk_index];
+                                                            inner_data_vector.mid[0] = mid[chunk_index];
+                                                            inner_data_vector.high[0] = high[chunk_index];
                                                         },
                                                         e if e == &dp2 => {
-                                                            inner_data_vector.low[1] += low[chunk_index];
-                                                            inner_data_vector.mid[1] += mid[chunk_index];
-                                                            inner_data_vector.high[1] += high[chunk_index];
+                                                            inner_data_vector.low[1] = low[chunk_index];
+                                                            inner_data_vector.mid[1] = mid[chunk_index];
+                                                            inner_data_vector.high[1] = high[chunk_index];
                                                         },
                                                         e if e == &dp3 => {
-                                                            inner_data_vector.low[2] += low[chunk_index];
-                                                            inner_data_vector.mid[2] += mid[chunk_index];
-                                                            inner_data_vector.high[2] += high[chunk_index];
+                                                            inner_data_vector.low[2] = low[chunk_index];
+                                                            inner_data_vector.mid[2] = mid[chunk_index];
+                                                            inner_data_vector.high[2] = high[chunk_index];
                                                         },
                                                         e if e == &dp4 => {
-                                                            inner_data_vector.low[3] += low[chunk_index];
-                                                            inner_data_vector.mid[3] += mid[chunk_index];
-                                                            inner_data_vector.high[3] += high[chunk_index];
+                                                            inner_data_vector.low[3] = low[chunk_index];
+                                                            inner_data_vector.mid[3] = mid[chunk_index];
+                                                            inner_data_vector.high[3] = high[chunk_index];
                                                         },
                                                         e if e == &dp5 => {
-                                                            inner_data_vector.low[4] += low[chunk_index];
-                                                            inner_data_vector.mid[4] += mid[chunk_index];
-                                                            inner_data_vector.high[4] += high[chunk_index];
+                                                            inner_data_vector.low[4] = low[chunk_index];
+                                                            inner_data_vector.mid[4] = mid[chunk_index];
+                                                            inner_data_vector.high[4] = high[chunk_index];
                                                         },
                                                         _ => unreachable!("dark photon only has these 5 nonzero elements"),
                                                     };
@@ -375,29 +375,29 @@ impl Theory for DarkPhoton {
 
                                                     match element {
                                                         e if e == &dp1 => {
-                                                            inner_data_vector.low[0] += low[chunk_index];
-                                                            inner_data_vector.mid[0] += mid[chunk_index];
-                                                            inner_data_vector.high[0] += high[chunk_index];
+                                                            inner_data_vector.low[0] = low[chunk_index];
+                                                            inner_data_vector.mid[0] = mid[chunk_index];
+                                                            inner_data_vector.high[0] = high[chunk_index];
                                                         },
                                                         e if e == &dp2 => {
-                                                            inner_data_vector.low[1] += low[chunk_index];
-                                                            inner_data_vector.mid[1] += mid[chunk_index];
-                                                            inner_data_vector.high[1] += high[chunk_index];
+                                                            inner_data_vector.low[1] = low[chunk_index];
+                                                            inner_data_vector.mid[1] = mid[chunk_index];
+                                                            inner_data_vector.high[1] = high[chunk_index];
                                                         },
                                                         e if e == &dp3 => {
-                                                            inner_data_vector.low[2] += low[chunk_index];
-                                                            inner_data_vector.mid[2] += mid[chunk_index];
-                                                            inner_data_vector.high[2] += high[chunk_index];
+                                                            inner_data_vector.low[2] = low[chunk_index];
+                                                            inner_data_vector.mid[2] = mid[chunk_index];
+                                                            inner_data_vector.high[2] = high[chunk_index];
                                                         },
                                                         e if e == &dp4 => {
-                                                            inner_data_vector.low[3] += low[chunk_index];
-                                                            inner_data_vector.mid[3] += mid[chunk_index];
-                                                            inner_data_vector.high[3] += high[chunk_index];
+                                                            inner_data_vector.low[3] = low[chunk_index];
+                                                            inner_data_vector.mid[3] = mid[chunk_index];
+                                                            inner_data_vector.high[3] = high[chunk_index];
                                                         },
                                                         e if e == &dp5 => {
-                                                            inner_data_vector.low[4] += low[chunk_index];
-                                                            inner_data_vector.mid[4] += mid[chunk_index];
-                                                            inner_data_vector.high[4] += high[chunk_index];
+                                                            inner_data_vector.low[4] = low[chunk_index];
+                                                            inner_data_vector.mid[4] = mid[chunk_index];
+                                                            inner_data_vector.high[4] = high[chunk_index];
                                                         },
                                                         _ => unreachable!("dark photon only has these 5 nonzero elements"),
                                                     };
