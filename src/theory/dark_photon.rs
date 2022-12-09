@@ -933,7 +933,6 @@ impl Theory for DarkPhoton {
 
                     // start of f = fdhat-fd components
 
-                    // TODO: update
                     // muy10 is FT(H2 + i*(1-H1)) at f = fdhat - fd
                     let muy10: Complex<f32> = (&cis_fh_f)
                         .mul(Complex::<f32>::new(1.0, 0.0)
