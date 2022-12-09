@@ -587,7 +587,7 @@ impl Theory for DarkPhoton {
                         .mul(mux_prefactor)
                         .sum();
 
-                    // mux3 is FT of (H5 + i(H3-H4)) at f=fd-fdhat
+                    // mux3 is FT of (-H5 + i(H3-H4)) at f=fd-fdhat
                     let mux3 = (&cis_f_fh)
                         .mul(h3
                             .iter()
@@ -633,11 +633,11 @@ impl Theory for DarkPhoton {
                     };
 
 
-                    // mux6 is Real(FT of 2*H1) + Im(FT of 2*H1)
+                    // mux6 is Real(FT of 2*H2) + Im(FT of 2*H1)
                     // at f = fd
                     let mux6: Complex<f32> = {
 
-                        // Real(FT of 2*H1)
+                        // Real(FT of 2*H2)
                         let first_term = 2.0*(&cis_f)
                             .mul(&h2)
                             .mul(mux_prefactor)
@@ -680,14 +680,14 @@ impl Theory for DarkPhoton {
                     // at f = fd
                     let mux8: Complex<f32> = {
 
-                        // Real(FT of 2*H4)
+                        // Real(FT of -2*H5)
                         let first_term = -2.0*(&cis_f)
                             .mul(&h5)
                             .mul(mux_prefactor)
                             .sum()
                             .re;
                             
-                        // Im(FT of -2*H5)
+                        // Im(FT of 2*(H3-H4))
                         let second_term = 2.0*(&cis_f)
                             .mul(&h3.sub(&h4))
                             .mul(mux_prefactor)
@@ -701,14 +701,14 @@ impl Theory for DarkPhoton {
                     // at f = fd
                     let mux9: Complex<f32> = {
 
-                        // Real(FT of 2*H4)
+                        // Real(FT of 2*H6)
                         let first_term = 2.0*(&cis_f)
                             .mul(&h6)
                             .mul(mux_prefactor)
                             .sum()
                             .re;
                             
-                        // Im(FT of -2*H5)
+                        // Im(FT of -2*H7)
                         let second_term = -2.0*(&cis_f)
                             .mul(&h7)
                             .mul(mux_prefactor)
@@ -722,12 +722,11 @@ impl Theory for DarkPhoton {
 
                     // mux10 is FT of (1 - H1 - iH2) at f = fdhat-fd
                     let mux10: Complex<f32> = (&cis_fh_f)
-                        .mul(Complex::<f32>::new(1.0, 0.0)
-                            .add(h1
+                        .mul(h1
                                 .iter()
                                 .zip(h2)
-                                .map(|(&h1_, &h2_)| Complex::new(-h1_, -h2_))
-                                .collect::<Array1<_>>()))
+                                .map(|(&h1_, &h2_)| Complex::new(1.0-h1_, -h2_))
+                                .collect::<Array1<_>>())
                         .mul(mux_prefactor)
                         .sum();
 
@@ -751,7 +750,7 @@ impl Theory for DarkPhoton {
                         .mul(mux_prefactor)
                         .sum();
 
-                    // mux13 is FT of (H5 + i*(H4 - H3)) at f = fdhat-fd
+                    // mux13 is FT of (-H5 + i*(H4 - H3)) at f = fdhat-fd
                     let mux13: Complex<f32> = (&cis_fh_f)
                         .mul(h3
                             .iter()
@@ -762,7 +761,7 @@ impl Theory for DarkPhoton {
                         .mul(mux_prefactor)
                         .sum();
 
-                    // mux14 is FT of (H4 + iH5) at f = fdhat-fd
+                    // mux14 is FT of (H6 + iH7) at f = fdhat-fd
                     let mux14: Complex<f32> = (&cis_fh_f)
                         .mul(h6
                             .iter()
@@ -773,7 +772,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // start of muy
-                    let muy_prefactor: f32 = mux_prefactor;
+                    let muy_prefactor: f32 = -mux_prefactor;
 
                     // Start of f = fd-fdhat components
 
@@ -797,7 +796,7 @@ impl Theory for DarkPhoton {
                         .mul(muy_prefactor)
                         .sum();
 
-                    // muy2 is FT of (H5 - iH4) at f=fd-fdhat
+                    // muy2 is FT of (-H5 - iH4) at f=fd-fdhat
                     let muy2 = (&cis_f_fh)
                         .mul(h4
                             .iter()
@@ -818,7 +817,7 @@ impl Theory for DarkPhoton {
                         .mul(muy_prefactor)
                         .sum();
 
-                    // muy4 is FT of (H6 - iH7) at f=fd-fdhat
+                    // muy4 is FT of (-H7 - iH6) at f=fd-fdhat
                     let muy4 = (&cis_f_fh)
                         .mul(h6
                             .iter()
@@ -892,7 +891,7 @@ impl Theory for DarkPhoton {
                         (first_term + second_term).into()
                     };
 
-                    // muy8 is 2*Re(FT(H3-H4)) + 2*Im(TF(H5)) at f = fd
+                    // muy8 is 2*Re(FT(H3-H4)) + 2*Im(FT(H5)) at f = fd
                     let muy8: Complex<f32> = {
 
                         // 2*Re(FT(H3-H4))
@@ -922,7 +921,7 @@ impl Theory for DarkPhoton {
                             .sum()
                             .re;
                             
-                        // Im(FT of -2*H5)
+                        // -2*Im(FT(H6))
                         let second_term = -2.0*(&cis_f)
                             .mul(&h6)
                             .mul(muy_prefactor)
@@ -961,23 +960,23 @@ impl Theory for DarkPhoton {
                         .mul(h4
                             .iter()
                             .zip(h5)
-                            .map(|(&h4_, &h5_)| Complex::new(h5_, -h4_))
+                            .map(|(&h4_, &h5_)| Complex::new(-h5_, h4_))
                             .collect::<Array1<_>>())
                         .mul(muy_prefactor)
                         .sum();
 
-                    // muy13 is FT(H3-H4+iH5) at f = fdhat-fd
+                    // muy13 is FT(H3-H4-iH5) at f = fdhat-fd
                     let muy13: Complex<f32> = (&cis_fh_f)
                         .mul(h3
                             .iter()
                             .zip(h4)
                             .zip(h5)
-                            .map(|((&h3_, &h4_), &h5_)| Complex::new(h3_ - h4_, h5_))
+                            .map(|((&h3_, &h4_), &h5_)| Complex::new(h3_ - h4_, -h5_))
                             .collect::<Array1<_>>())
                         .mul(muy_prefactor)
                         .sum();
 
-                    // muy14 is FT of (H4 + iH5) at f = fdhat-fd
+                    // muy14 is FT of (-H7 + iH6) at f = fdhat-fd
                     let muy14: Complex<f32> = (&cis_fh_f)
                         .mul(h6
                             .iter()
