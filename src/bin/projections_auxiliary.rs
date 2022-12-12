@@ -1,17 +1,15 @@
-use supermag_analysis::constants::{NUM_LEAP_YEARS, DATA_DAYS};
-use supermag_analysis::utils::loader::day_since_first;
-use supermag_analysis::weights::{Analysis, Stationarity, Coherence};
-use supermag_analysis::utils::async_balancer::Balancer;
+use supermag_analysis::constants::{DATA_DAYS, NUM_LEAP_YEARS};
 use supermag_analysis::theory::dark_photon::DarkPhoton;
+use supermag_analysis::utils::async_balancer::Balancer;
+use supermag_analysis::utils::loader::day_since_first;
+use supermag_analysis::weights::{Analysis, Coherence, Stationarity};
 
 fn main() {
+    env_logger::builder().filter_level(log::LevelFilter::Debug);
 
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Debug);
-    
-    // Define stationarity time, Coherence time 
+    // Define stationarity time, Coherence time
     // const STATIONARITY_TIME: Stationarity = Stationarity::Daily(1);
-    let coherence = Coherence::Days(1);
+    let coherence = Coherence::Days(1); // TODO: stationarity
 
     // Which subset of the data to use
     let days_to_use = DATA_DAYS;
@@ -28,9 +26,10 @@ fn main() {
         coherence,
         theory,
         Some(days_to_use),
-        &mut balancer.manager
+        &mut balancer.manager,
     );
-    balancer.runtime
+    balancer
+        .runtime
         .block_on(complete_series_fut)
         .expect("failed to build the complete series");
 }
