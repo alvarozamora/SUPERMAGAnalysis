@@ -233,7 +233,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     let chunk_projections: DashMap<NonzeroElement, TimeSeries> = local_theory
                         .calculate_projections(
                             &local_hashmap_n,
-                            &local_hashmap_n,
+                            &local_hashmap_e,
                             &local_wn,
                             &local_we,
                             &datasets
@@ -241,7 +241,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     let chunk_auxiliary = local_theory
                         .calculate_auxiliary_values(
                             &local_hashmap_n,
-                            &local_hashmap_n,
+                            &local_hashmap_e,
                             &local_wn,
                             &local_we,
                             &datasets
@@ -876,10 +876,12 @@ async fn calculate_weights_for_chunk(
             }
 
             // Clean the fields and find valid entries
+            // NOTE: field_1 is flipped here to be negative because polar unit vector points south,
+            // i.e. B_polar = -B_north
             let (valid_entries_1, clean_field_1): (Array1<bool>, TimeSeries) = {
                 let (entries, field): (Vec<bool>, Vec<f32>) = dataset.field_1
                     .iter()
-                    .map(|&x| if x != SUPERMAG_NAN { (true, x) } else { (false, 0.0) })
+                    .map(|&x| if x != SUPERMAG_NAN { (true, -x) } else { (false, 0.0) })
                     .unzip();
                 (Array1::from_vec(entries), Array1::from_vec(field)) 
             };
@@ -926,9 +928,9 @@ async fn calculate_weights_for_chunk(
                 );
             }
 
-            // Calculate weights (NOTE: these were swapped at some point due to a typo idenitified in the paper)
-            let n_weight: f32 = (clean_field_2.dot(&clean_field_2) / num_samples as f32).recip();
-            let e_weight: f32 = (clean_field_1.dot(&clean_field_1) / num_samples as f32).recip();
+            // Calculate weights
+            let n_weight: f32 = (clean_field_1.dot(&clean_field_1) / num_samples as f32).recip();
+            let e_weight: f32 = (clean_field_2.dot(&clean_field_2) / num_samples as f32).recip();
 
             let wn_weight: TimeSeries = valid_entries_1.map(|&is_valid| if is_valid { n_weight } else { 0.0 });
             let we_weight: TimeSeries = valid_entries_2.map(|&is_valid| if is_valid { e_weight } else { 0.0 });
