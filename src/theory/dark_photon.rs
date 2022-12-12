@@ -2323,41 +2323,59 @@ pub struct DarkPhotonAuxiliary {
 impl FromChunkMap for DarkPhotonAuxiliary {
     fn from_chunk_map(
         auxiliary_values_chunked: &DashMap<usize, Self>,
-        secs_per_chunk: usize,
+        stationarity: Stationarity,
         starting_value: usize,
         size: usize,
     ) -> Self {
 
-        // Initialie auxiliary array to zeros
+        // Initialize auxiliary array to zeros
+        let (start_first, _) = stationarity.get_year_indices(starting_value);
+        let (_, end_last) = stationarity.get_year_indices(starting_value + size);
         let mut auxiliary_values = [(); 7]
-            .map(|_| TimeSeries::zeros(size * secs_per_chunk));
+            .map(|_| TimeSeries::zeros(end_last - start_first + 1));
 
-        auxiliary_values_chunked
-            .iter()
-            .for_each(|chunk| {
+        // auxiliary_values_chunked
+        //     .iter()
+        //     .for_each(|chunk| {
 
-                // Get chunk and it's auxiliary_value
-                let (&current_chunk, chunk_auxiliary) = chunk.pair();
+        //         // Get chunk and it's auxiliary_value
+        //         let (&current_chunk, chunk_auxiliary) = chunk.pair();
 
-                if !in_longest_subset(current_chunk, size, starting_value) {
-                    return ()
-                }
+        //         if !in_longest_subset(current_chunk, size, starting_value) {
+        //             return ()
+        //         }
 
-                // Insert array into complete series
-                // TODO: THIS ASSUMES ALL CHUNKS ARE THE SAME LENGTH.
-                // NEED TO CHANGE FOR YEARLY STATIONARITY AND PERHAPS THE EDGE CHUNKS.
-                let start_index = (current_chunk-starting_value)*chunk_auxiliary.h[0].len();
-                let end_index = start_index + chunk_auxiliary.h[0].len();
+        //         // Insert array into complete series
+        //         // TODO: THIS ASSUMES ALL CHUNKS ARE THE SAME LENGTH.
+        //         // NEED TO CHANGE FOR YEARLY STATIONARITY AND PERHAPS THE EDGE CHUNKS.
+        //         let start_index = (current_chunk-starting_value)*chunk_auxiliary.h[0].len();
+        //         let end_index = start_index + chunk_auxiliary.h[0].len();
 
-                for i in 0..7 {
-                    auxiliary_values
+        //         for i in 0..7 {
+        //             auxiliary_values
+        //             .get_mut(i)
+        //             .unwrap()
+        //             .slice_mut(s![start_index..end_index])
+        //             .assign(&chunk_auxiliary.h[i]);
+        //         }
+        //     });
+
+        let mut values_assigned: usize = 0;
+        for chunk in starting_value..(starting_value+size) {
+            let (_, auxiliary) = auxiliary_values_chunked.remove(&chunk).unwrap();
+
+            let start_index = values_assigned;
+            let end_index = values_assigned + auxiliary.h[0].len();
+            values_assigned += auxiliary.h[0].len();
+
+            for i in 0..7 {
+                auxiliary_values
                     .get_mut(i)
                     .unwrap()
                     .slice_mut(s![start_index..end_index])
-                    .assign(&chunk_auxiliary.h[i]);
-                }
-            });
-                    
+                    .assign(&auxiliary.h[i]);
+            }
+        }
         
         DarkPhotonAuxiliary { h: auxiliary_values }
     }

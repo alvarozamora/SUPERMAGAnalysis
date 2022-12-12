@@ -44,7 +44,7 @@ pub type DFTValue = Complex<f32>;
 pub trait FromChunkMap: Sized {
     fn from_chunk_map(
         chunk_map: &DashMap<usize, Self>,
-        secs_per_chunk: usize,
+        stationarity: Stationarity,
         starting_value: usize,
         size: usize,
     ) -> Self;

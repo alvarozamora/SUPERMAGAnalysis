@@ -301,25 +301,19 @@ pub struct DatasetLoader {
     /// (at the very least) the data file exists, but the data file may still contain NaNs and thus be invalid.
     pub semivalid_chunks: Arc<DashMap<Index, Vec<Chunk>>>,
     days: Range<usize>,
-    chunk_size_in_days: usize,
+    stationarity: Stationarity,
     declinations_interpolator: Declinations,
     // chunk: usize,
 }
 
 impl DatasetLoader {
     // This function gathers all metadata required for loading a chunk of data
-    pub fn new(days: Option<Range<usize>>, coherence: Coherence) -> Self {
-        // Size of data chunks
-        let coherence_time_in_days = match coherence {
-            Coherence::Days(days) => days,
-            Coherence::Yearly => todo!(),
-        };
-
+    pub fn new(days: Option<Range<usize>>, stationarity: Stationarity) -> Self {
         // Construct coordinate map
         let coordinate_map = Arc::new(construct_coordinate_map());
 
         // Find all stations for which there is data for this year
-        let semivalid_chunks = retrieve_chunks(days.clone(), coherence_time_in_days);
+        let semivalid_chunks = retrieve_chunks(days.clone(), stationarity);
 
         // Initialize declination interpolator
         let declinations_interpolator = Declinations::load();
@@ -328,7 +322,7 @@ impl DatasetLoader {
             coordinate_map,
             semivalid_chunks,
             days: days.unwrap_or(DATA_DAYS),
-            chunk_size_in_days: coherence_time_in_days,
+            stationarity,
             declinations_interpolator,
         }
     }
@@ -486,7 +480,7 @@ fn retrieve_stations(year: usize) -> Vec<String> {
 
 fn retrieve_chunks(
     days: Option<Range<usize>>,
-    chunk_size_in_days: usize,
+    stationarity: Stationarity,
 ) -> Arc<DashMap<Index, Vec<Chunk>>> {
     // Gather paths to all stations
     let stations: Vec<_> = glob("../stations/*")
@@ -502,11 +496,16 @@ fn retrieve_chunks(
     let semivalid_chunks = Arc::new(DashMap::new());
 
     // Iterate through every chunk of days
-    days.unwrap_or(DATA_DAYS)
-        .step_by(chunk_size_in_days)
-        .map(|x| (x..).take(chunk_size_in_days))
-        .collect::<Vec<_>>()
-        .into_par_iter()
+    // TODO: cleanup. this was used for stationarity = some number of days
+    // days.unwrap_or(DATA_DAYS)
+    //     .step_by(chunk_size_in_days)
+    //     .map(|x| (x..).take(chunk_size_in_days))
+    //     .collect::<Vec<_>>()
+    //     .into_par_iter()
+    //     .enumerate()
+    stationarity
+        .get_chunks()
+        .into_iter()
         .enumerate()
         .for_each(|(index, chunk)| {
             // Initialize vector which holds which stations contain semi-valid data for this chunk
@@ -521,7 +520,7 @@ fn retrieve_chunks(
                         .collect();
 
                     // Get the second at which this chunk begins
-                    let start_sec = index * chunk_size_in_days * SECONDS_PER_DAY;
+                    let start_sec = chunk.start * SECONDS_PER_DAY + 1;
 
                     // Then check if they all exist
                     if files.iter().all(|file| station_days.contains(file)) {

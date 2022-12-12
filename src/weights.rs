@@ -53,7 +53,7 @@ pub struct Weights {
     pub e: DashMap<Index, DashMap<StationName, Weight>>,
     pub wn: DashMap<Index, TimeSeries>,
     pub we: DashMap<Index, TimeSeries>,
-    pub coherence: Coherence,
+    pub stationarity: Stationarity,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -109,8 +109,8 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
     /// Chuck all data prior to 2003
     /// Do coordinate transformation: linearly interpolate between the values in `IGRF_declinations_for_1sec.txt`. The values given are for the start of the 180th day of each year.
     pub async fn calculate_projections_and_auxiliary(
-        // stationarity: Stationarity,
-        coherence: Coherence,
+        stationarity: Stationarity,
+        // coherence: Coherence,
         theory: T,
         days: Option<Range<usize>>,
         balancer: &mut Manager<()>
@@ -118,19 +118,20 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
         println!("Running Analysis");
 
-        // // Number of days per chunk
-        // let stationarity: usize = match stationarity {
-        //     Stationarity::Yearly => todo!(),
-        //     Stationarity::Daily(days) => days,
-        // };
-
-        let days_per_chunk = match coherence {
-            Coherence::Days(num_days_per_chunk) => num_days_per_chunk,
-            Coherence::Yearly => todo!(),
+        // Number of days per chunk
+        // TODO: fix
+        let days_per_chunk: usize = match stationarity {
+            Stationarity::Yearly => 365, // TODO,
+            Stationarity::Daily(_) => 365,
         };
 
+        // let days_per_chunk = match stationarity {
+        //     Coherence::Days(num_days_per_chunk) => num_days_per_chunk,
+        //     Coherence::Yearly => todo!(),
+        // };
+
         // Grab dataset loader for the chunks
-        let loader = Arc::new(DatasetLoader::new(days.clone(), coherence));
+        let loader = Arc::new(DatasetLoader::new(days.clone(), stationarity));
 
         // Initialize empty `Weights`
         let weights: Arc<Weights> = Arc::new(Weights {
@@ -138,7 +139,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 e: DashMap::new(),
                 wn: DashMap::new(),
                 we: DashMap::new(),
-                coherence,
+                stationarity,
         });
 
         // Initialize empty data vector, projections
@@ -394,15 +395,18 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 get_largest_contiguous_subset(&set)
             };
             println!("rank {}: longest contiguous subset of chunks begins at {starting_value} and has length {size} chunks", balancer.rank);
-            println!("rank {}: this starts {:?} and ends {:?}", balancer.rank, sec_to_year(starting_value * 24 * 60 * 60), sec_to_year((starting_value + size) * 24 * 60 * 60));
+            // TODO: cleanup: this was back when starting_value was a day-based chunk
+            // println!("rank {}: this starts {:?} and ends {:?}", balancer.rank, sec_to_year(starting_value * 24 * 60 * 60), sec_to_year((starting_value + size) * 24 * 60 * 60));
+            println!("rank {}: this starts on year {:?} and ends on year {:?}", balancer.rank, starting_value, starting_value + size);
 
-            // TODO: generalize to yearly
-            let secs_per_chunk = SECONDS_PER_DAY * days_per_chunk;
+            // TODO: generalize to sec
+            let (start_first, _) = stationarity.get_year_indices(starting_value);
+            let (_, end_last) = stationarity.get_year_indices(starting_value + size);
 
             let complete_series = Arc::new(DashMap::new());
             for element in &nonzero_elements {
-                let empty_array = TimeSeries::zeros(size * secs_per_chunk);
-                debug_print!("initializing map element {:?} with zeros array of len {}={}", element, size * secs_per_chunk, empty_array.len());
+                let empty_array = TimeSeries::zeros(end_last - start_first + 1);
+                debug_print!("initializing map element {:?} with zeros array of len {}", element, end_last - start_first + 1);
                 complete_series.insert(element.clone(), empty_array);
             }
 
@@ -558,11 +562,11 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             start_second = starting_value * 24 * 60 * 60;
 
             // TODO: generalize to yearly
-            let secs_per_chunk: usize = SECONDS_PER_DAY * days_per_chunk;
+            // let secs_per_chunk: usize = SECONDS_PER_DAY * days_per_chunk;
 
             let complete_series = <T as Theory>::AuxiliaryValue::from_chunk_map(
                 &auxiliary_values,
-                secs_per_chunk,
+                stationarity,
                 starting_value,
                 size,
             );
@@ -712,6 +716,30 @@ impl Stationarity {
         let end = day_since_first(0, year+1) * 24 * 60 * 60 - 1;
 
         (start, end)
+    }
+
+    /// Length of year in seconds
+    pub fn year_secs(&self, year: usize) -> usize {
+        // Get start and end of year
+        let (start, end) = self.get_year_indices(year);
+        end-start+1
+    }
+
+    /// Get chunks. Indices returned correspond to days, not seconds
+    pub fn get_chunks(&self) -> Vec<Range<usize>> {
+        let mut chunks = vec![];
+        match self {
+            Stationarity::Yearly => {
+                (1998..2020)
+                    .for_each(|year| {
+                        chunks.push(day_since_first(0,year)..day_since_first(0,year+1));
+                    })
+            }
+            Stationarity::Daily(_) => {
+                unimplemented!("only doing yearly for now")
+            }
+        }
+        chunks
     }
 }
 

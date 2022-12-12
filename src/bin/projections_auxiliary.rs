@@ -8,8 +8,8 @@ fn main() {
     env_logger::builder().filter_level(log::LevelFilter::Debug);
 
     // Define stationarity time, Coherence time
-    // const STATIONARITY_TIME: Stationarity = Stationarity::Daily(1);
-    let coherence = Coherence::Days(1); // TODO: stationarity
+    const STATIONARITY_TIME: Stationarity = Stationarity::Yearly;
+    // let coherence = Coherence::Days(1); // TODO: stationarity
 
     // Which subset of the data to use
     let days_to_use = DATA_DAYS;
@@ -23,7 +23,7 @@ fn main() {
 
     // Compute weights for this coherence time
     let complete_series_fut = Analysis::calculate_projections_and_auxiliary(
-        coherence,
+        STATIONARITY_TIME,
         theory,
         Some(days_to_use),
         &mut balancer.manager,
