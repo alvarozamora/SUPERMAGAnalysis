@@ -61,7 +61,7 @@ pub trait Theory: Send + Debug {
     // Theory Average and Variance (Noise Spectra)
     type Mu: Serialize + DeserializeOwned + Send + Sync;
     type Var: Serialize + DeserializeOwned + Send + Sync;
-    type DataVector: Serialize + DeserializeOwned + Send + Sync;
+    type DataVector: Send + Sync;
 
     /// Gets nonzero elements for the theory.
     fn get_nonzero_elements() -> HashSet<NonzeroElement>;
@@ -127,8 +127,7 @@ pub trait Theory: Send + Debug {
         coherence_times: usize,
         days: Range<usize>,
         stationarity: Stationarity,
-        auxiliary_values: Arc<Self::AuxiliaryValue>,
-    ) -> DashMap<usize, f64>;
+    ) -> Vec<(f32, f32)>;
 }
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]

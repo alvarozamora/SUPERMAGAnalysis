@@ -1,28 +1,27 @@
 use super::*;
-use std::{collections::HashMap};
-use dashmap::{DashMap, mapref::one::Ref};
+use std::{collections::HashMap, sync::{MutexGuard, TryLockError}};
+use dashmap::{DashMap, ReadOnlyView};
 use interp1d::Interp1d;
 use itertools::Itertools;
-use num_format::{ToFormattedString, Locale};
 use rustfft::FftPlanner;
 use serde_derive::{Serialize, Deserialize};
+use tokio::sync::Semaphore;
 use std::sync::Arc;
 use crate::{utils::{
     loader::Dataset,
     approximate_sidereal, coordinates::Coordinates, fft::get_frequency_range_1s,
 }, constants::{SIDEREAL_DAY_SECONDS}, weights::in_longest_subset};
 use std::{
-    ops::{Mul, Div, Add, Range, Sub, AddAssign},
+    ops::{Mul, Div, Add, Range, Sub},
 };
-use ndrustfft::{FftHandler, ndfft, Zero};
+use ndrustfft::{FftHandler, ndfft, ndfft_par};
 use rayon::prelude::*;
-use ndarray::{s, ScalarOperand, Array2, array, Axis};
+use ndarray::{s, ScalarOperand, Array2, Axis};
 use num_traits::{ToPrimitive, Float, Num};
 use ndrustfft::Complex;
-use std::sync::atomic::{Ordering, AtomicU32};
-use std::f64::consts::PI;
+use std::sync::{Mutex, atomic::{Ordering, AtomicU32}};
 use std::f32::consts::PI as SINGLE_PI;
-use indicatif::ProgressBar;
+use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
 use ndarray_linalg::{Cholesky, solve::Inverse, UPLO, SVD};
 
 
@@ -32,7 +31,9 @@ const ONE: Complex<f32> = Complex::new(1.0, 0.0);
 /// Size of chunks (used for noise spectra ffts)
 const TAU: usize = 16384 * 64;
 
+type CoherenceTime = usize;
 type Window = usize;
+type Chunk = usize;
 pub type InnerVarChunkWindowMap = DashMap<Window, Triplet>;
 pub type InnerAChunkWindowMap = DashMap<Window, DashMap<Triplet, (Array2<Complex<f32>>,  Array2<Complex<f32>>)>>;
 
@@ -145,7 +146,8 @@ impl Theory for DarkPhoton {
     type Mu = DarkPhotonMu;
     type Var = InnerVarChunkWindowMap;
     // type DataVector = DashMap<usize, DashMap<NonzeroElement, Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)>>>;
-    type DataVector = DashMap<usize /* Tc */, DashMap<usize /* chunk */, DashMap<usize /* window/triplet */, DarkPhotonVec<f64>>>>;
+    // type DataVector = DashMap<usize /* Tc */, DashMap<usize /* chunk */, DashMap<usize /* window/triplet */, DarkPhotonVec<f32>>>>;
+    type DataVector = ReadOnlyView<(CoherenceTime, Chunk, Window), DarkPhotonVec<f32>>;
 
     fn get_nonzero_elements() -> HashSet<NonzeroElement> {
 
@@ -254,8 +256,8 @@ impl Theory for DarkPhoton {
         local_set: &Vec<(usize, FrequencyBin)>,
     ) -> Self::DataVector {
 
-        // Parallelize local_set on this rank
-        let data_vector_dashmap = DashMap::new();
+        // This holds all (15 x 1) data vectors
+        let data_vector_dashmap = DashMap::with_capacity_and_shard_amount(local_set.len().next_power_of_two() * 4, 128);
 
         // Local references
         let dp1 = DARK_PHOTON_NONZERO_ELEMENTS[0].clone();
@@ -264,20 +266,36 @@ impl Theory for DarkPhoton {
         let dp4 = DARK_PHOTON_NONZERO_ELEMENTS[3].clone();
         let dp5 = DARK_PHOTON_NONZERO_ELEMENTS[4].clone();
 
+        log::debug!("starting data vector");
+        let multi = MultiProgress::new();
+        let sty = ProgressStyle::with_template(
+                "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {msg}",
+            )
+            .unwrap();
+        let ch_pb = multi.add(ProgressBar::new(local_set.len() as u64));
+        ch_pb.set_style(sty.clone());
+        ch_pb.inc(0);
+
+
+        let fft_semaphore = Semaphore::const_new(100); // essentially, no limit
+        let total_num = local_set.len();
+        let mut counter = 0;
         local_set
-            .par_iter()
+            .iter()
             .for_each(|(coherence_time /* usize */, frequency_bin /* FrequencyBin */)| {
-                
-                // This holds the result for a single coherence time
-                // The usize is the window index. 
-                // The array1 holds all (15 x 1) data vectors for all frequency triplets for that window
-                let inner_dashmap: DashMap<usize /* chunk_index */, DashMap<usize /* window_index */, DarkPhotonVec<f64>>> = DashMap::new();
+
+                counter += 1;
+                log::info!("coherence time {counter} of {total_num}");
+
+                let pb = multi.add(ProgressBar::new(5));
+                pb.set_style(sty.clone());
+                pb.inc(0);
 
                 // Parallelize over all nonzero elements in the theory
                 projections_complete
                     .projections_complete
                     .par_iter()
-                    .for_each_with(&inner_dashmap, |inner_map, series| {
+                    .for_each_with(&data_vector_dashmap, |data_vector_map, series| {
                         
                         // Unpack element, series
                         let (element, series) = series.pair();
@@ -288,17 +306,21 @@ impl Theory for DarkPhoton {
                         let exact_chunks_size: usize = exact_chunks * coherence_time;
 
                         // Chunk series
-                        let two_dim_series = series
+                        let two_dim_series: Array2<Complex<f32>> = series
                             .slice(s!(0..exact_chunks_size))
                             .into_shape((*coherence_time, exact_chunks))
                             .expect("This shouldn't fail ever. If anything we should get an early panic from .slice()")
-                            .map(|x| Complex { re: *x as f64, im: 0.0});
+                            .map(|x| x.into());
+                        drop(series); // to save memory
 
                         // Do ffts
                         let num_fft_elements = *coherence_time;
-                        let mut fft_handler = FftHandler::<f64>::new(*coherence_time);
-                        let mut fft_result = ndarray::Array2::<Complex<f64>>::zeros((num_fft_elements, exact_chunks));
-                        ndfft(&two_dim_series, &mut fft_result, &mut fft_handler, 0);
+                        let mut fft_handler = FftHandler::<f32>::new(*coherence_time);
+                        let permit = fft_semaphore.acquire();
+                        let mut fft_result = ndarray::Array2::<Complex<f32>>::zeros((num_fft_elements, exact_chunks));
+                        ndfft_par(&two_dim_series, &mut fft_result, &mut fft_handler, 0);
+                        drop(two_dim_series); // to save memory
+                        drop(fft_handler);
 
                         // Get values at relevant frequencies
                         let approx_sidereal: usize = approximate_sidereal(frequency_bin);
@@ -311,109 +333,44 @@ impl Theory for DarkPhoton {
                         let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
                         let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
                         let relevant_range = start_relevant..=end_relevant;
-                        log::debug!("relevant_range is {start_relevant}..={end_relevant}");
-                        let relevant_values = fft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range));
+                        // log::debug!("relevant_range is {start_relevant}..={end_relevant}");
+                        // let relevant_values = fft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range));
+                        // Overwrite to save memory!
+                        fft_result = fft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range)).to_owned();
+                        drop(permit);
 
-                        relevant_values
+                        // Get all relevant triplets -- KEEP THIS HERE FOR NOW
+                        // let relevant_triplets: Vec<(Array1<Complex<f64>>, Array1<Complex<f64>>, Array1<Complex<f64>>)> = relevant_values
+                        //     .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
+                        //     .into_iter()
+                        //     .map(|window| 
+                        //         (
+                        //             // NOTE: technically this might be an expensive clone, but it is likely okay.
+                        //             window.slice(s![0_usize, ..]).to_owned(),
+                        //             window.slice(s![approx_sidereal, ..]).to_owned(),
+                        //             window.slice(s![2*approx_sidereal, ..]).to_owned(),
+                        //         )).collect();
+
+                        // relevant_values
+                        fft_result
                             .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
                             .into_iter()
                             .enumerate()
                             .for_each(|(window_index, window)|{
-
+                                
                                 // These have shape 1 x num_chunks
-                                let low = window.slice(s![0_usize, ..]).to_owned();
-                                let mid = window.slice(s![approx_sidereal, ..]).to_owned();
-                                let high = window.slice(s![2*approx_sidereal, ..]).to_owned();
-
-                                for chunk_index in 0..low.len() {
-                                    inner_map
-                                        .entry(chunk_index)
-                                        .and_modify(|window_map| {
-
-                                            window_map
-                                                .entry(window_index)
-                                                .and_modify(|inner_data_vector| {
-                                                    match element {
-                                                        e if e == &dp1 => {
-                                                            inner_data_vector.low[0] = low[chunk_index];
-                                                            inner_data_vector.mid[0] = mid[chunk_index];
-                                                            inner_data_vector.high[0] = high[chunk_index];
-                                                        },
-                                                        e if e == &dp2 => {
-                                                            inner_data_vector.low[1] = low[chunk_index];
-                                                            inner_data_vector.mid[1] = mid[chunk_index];
-                                                            inner_data_vector.high[1] = high[chunk_index];
-                                                        },
-                                                        e if e == &dp3 => {
-                                                            inner_data_vector.low[2] = low[chunk_index];
-                                                            inner_data_vector.mid[2] = mid[chunk_index];
-                                                            inner_data_vector.high[2] = high[chunk_index];
-                                                        },
-                                                        e if e == &dp4 => {
-                                                            inner_data_vector.low[3] = low[chunk_index];
-                                                            inner_data_vector.mid[3] = mid[chunk_index];
-                                                            inner_data_vector.high[3] = high[chunk_index];
-                                                        },
-                                                        e if e == &dp5 => {
-                                                            inner_data_vector.low[4] = low[chunk_index];
-                                                            inner_data_vector.mid[4] = mid[chunk_index];
-                                                            inner_data_vector.high[4] = high[chunk_index];
-                                                        },
-                                                        _ => unreachable!("dark photon only has these 5 nonzero elements"),
-                                                    };
-                                                })
-                                                .or_insert_with(|| {
-                                                    // Initialize with zeros and metadata
-                                                    let mut inner_data_vector = DarkPhotonVec {
-                                                        low: [0.0.into(); 5].into_iter().collect(),
-                                                        mid: [0.0.into(); 5].into_iter().collect(),
-                                                        high: [0.0.into(); 5].into_iter().collect(),
-                                                        coh_time: *coherence_time,
-                                                        window: window_index,
-                                                        chunk: chunk_index,
-                                                    };
-
-                                                    match element {
-                                                        e if e == &dp1 => {
-                                                            inner_data_vector.low[0] = low[chunk_index];
-                                                            inner_data_vector.mid[0] = mid[chunk_index];
-                                                            inner_data_vector.high[0] = high[chunk_index];
-                                                        },
-                                                        e if e == &dp2 => {
-                                                            inner_data_vector.low[1] = low[chunk_index];
-                                                            inner_data_vector.mid[1] = mid[chunk_index];
-                                                            inner_data_vector.high[1] = high[chunk_index];
-                                                        },
-                                                        e if e == &dp3 => {
-                                                            inner_data_vector.low[2] = low[chunk_index];
-                                                            inner_data_vector.mid[2] = mid[chunk_index];
-                                                            inner_data_vector.high[2] = high[chunk_index];
-                                                        },
-                                                        e if e == &dp4 => {
-                                                            inner_data_vector.low[3] = low[chunk_index];
-                                                            inner_data_vector.mid[3] = mid[chunk_index];
-                                                            inner_data_vector.high[3] = high[chunk_index];
-                                                        },
-                                                        e if e == &dp5 => {
-                                                            inner_data_vector.low[4] = low[chunk_index];
-                                                            inner_data_vector.mid[4] = mid[chunk_index];
-                                                            inner_data_vector.high[4] = high[chunk_index];
-                                                        },
-                                                        _ => unreachable!("dark photon only has these 5 nonzero elements"),
-                                                    };
-                                                    inner_data_vector
-                                                });
-
-                                        }).or_insert_with(|| {
-                                            let empty_map = DashMap::new();
-                                            let mut inner_data_vector = DarkPhotonVec {
-                                                low: [0.0.into(); 5].into_iter().collect(),
-                                                    mid: [0.0.into(); 5].into_iter().collect(),
-                                                    high: [0.0.into(); 5].into_iter().collect(),
-                                                coh_time: *coherence_time,
-                                                window: window_index,
-                                                chunk: chunk_index,
-                                            };
+                                let low = window.slice(s![0_usize, ..]);
+                                let mid = window.slice(s![approx_sidereal, ..]);
+                                let high = window.slice(s![2*approx_sidereal, ..]);
+                                
+                                (0..low.len())
+                                    .into_par_iter()
+                                    .for_each_with(&data_vector_map, |map, chunk_index| {
+                                    pb.set_message(format!("chunk {} of {}", chunk_index, low.len()));
+                                    // data_vector_map
+                                    map
+                                        .entry((*coherence_time, chunk_index, window_index))
+                                        .and_modify(|inner_data_vector: &mut DarkPhotonVec<f32>| {
                                             match element {
                                                 e if e == &dp1 => {
                                                     inner_data_vector.low[0] += low[chunk_index];
@@ -440,21 +397,58 @@ impl Theory for DarkPhoton {
                                                     inner_data_vector.mid[4] += mid[chunk_index];
                                                     inner_data_vector.high[4] += high[chunk_index];
                                                 },
-                                                _ => unreachable!("only 5 nonzero elements"),
+                                                _ => unreachable!("dark photon only has these 5 nonzero elements"),
                                             };
-                                            empty_map.insert(window_index, inner_data_vector);
-                                            empty_map
-                                        });
-                                }
-                            });
-                    });
+                                        })
+                                        .or_insert_with(|| {
+                                            // Initialize with zeros and metadata
+                                            let mut inner_data_vector = DarkPhotonVec {
+                                                low: [0.0.into(); 5].into_iter().collect(),
+                                                mid: [0.0.into(); 5].into_iter().collect(),
+                                                high: [0.0.into(); 5].into_iter().collect(),
+                                                // coh_time: *coherence_time,
+                                                // window: window_index,
+                                                // chunk: chunk_index,
+                                            };
 
-                // Insert inner map
-                assert!(data_vector_dashmap
-                    .insert(*coherence_time, inner_dashmap).is_none(), "Somehow a duplicate entry was made");
+                                            match element {
+                                                e if e == &dp1 => {
+                                                    inner_data_vector.low[0] += low[chunk_index];
+                                                    inner_data_vector.mid[0] += mid[chunk_index];
+                                                    inner_data_vector.high[0] += high[chunk_index];
+                                                },
+                                                e if e == &dp2 => {
+                                                    inner_data_vector.low[1] += low[chunk_index];
+                                                    inner_data_vector.mid[1] += mid[chunk_index];
+                                                    inner_data_vector.high[1] += high[chunk_index];
+                                                },
+                                                e if e == &dp3 => {
+                                                    inner_data_vector.low[2] += low[chunk_index];
+                                                    inner_data_vector.mid[2] += mid[chunk_index];
+                                                    inner_data_vector.high[2] += high[chunk_index];
+                                                },
+                                                e if e == &dp4 => {
+                                                    inner_data_vector.low[3] += low[chunk_index];
+                                                    inner_data_vector.mid[3] += mid[chunk_index];
+                                                    inner_data_vector.high[3] += high[chunk_index];
+                                                },
+                                                e if e == &dp5 => {
+                                                    inner_data_vector.low[4] += low[chunk_index];
+                                                    inner_data_vector.mid[4] += mid[chunk_index];
+                                                    inner_data_vector.high[4] += high[chunk_index];
+                                                },
+                                                _ => unreachable!("dark photon only has these 5 nonzero elements"),
+                                            };
+                                            inner_data_vector
+                                        });
+                                });
+                            });
+                        pb.inc(1);
+                    });
+                ch_pb.inc(1);
             });
 
-        data_vector_dashmap
+        data_vector_dashmap.into_read_only()
     }
 
     /// NOTE: this implementation assumes that the time series is fully contiguous (with no null values).
@@ -1254,7 +1248,8 @@ impl Theory for DarkPhoton {
         log::debug!("Stitching spectra; there are {coherence_times} coherence times");
 
         // Stitch spectra together according to coherence times
-        let disk_db = DiskDB::connect("./sigma/")
+        let node_id: usize = std::env::var("SLURM_NODEID").unwrap_or("0".to_string()).parse().unwrap();
+        let disk_db = DiskDB::connect(format!("./sigma_{node_id}/"))
             .expect("failed to open sigma db");
         let triplet_counter = AtomicU32::new(0);
         set
@@ -1409,12 +1404,12 @@ impl Theory for DarkPhoton {
                                                             low: low_array,
                                                             mid: mid_array,
                                                             high: high_array,
-                                                            lowf: lowf,
+                                                            // lowf: lowf,
                                                             midf: midf,
-                                                            hif: hif,
-                                                            coh_time: *coherence_time,
-                                                            chunk: chunk,
-                                                            window: Some(window_index),
+                                                            // hif: hif,
+                                                            // coh_time: *coherence_time,
+                                                            // chunk: chunk,
+                                                            // window: Some(window_index),
                                                         }
                                                     });
                                             });
@@ -1457,11 +1452,11 @@ impl Theory for DarkPhoton {
         coherence_times: usize,
         days: Range<usize>,
         stationarity: Stationarity,
-        auxiliary_values: Arc<Self::AuxiliaryValue>,
-    ) -> DashMap<usize, f64> {
+    ) -> Vec<(f32, f32)> {
 
         // Load sigma
-        let sigma_db = DiskDB::connect("./sigma/")
+        let node_id: usize = std::env::var("SLURM_NODEID").unwrap_or("0".to_string()).parse().unwrap();
+        let sigma_db = DiskDB::connect(format!("./sigma_{node_id}/"))
             .expect("database should exist by this stage");
 
         // Initialize database where A_k and Ainv_k is stored
@@ -1483,10 +1478,10 @@ impl Theory for DarkPhoton {
                     .get(&coherence_time)
                     .expect("theory mean should exist for every coherence time here");
 
-                // Get data vector component for coherence time
-                let data_vector_ct = data_vector
-                    .get(&coherence_time)
-                    .expect("data vector should exist for every coherence time here");
+                // // Get data vector component for coherence time
+                // let data_vector_ct = data_vector
+                //     .get(&coherence_time)
+                //     .expect("data vector should exist for every coherence time here");
 
                 // For this coherence time, get the map to every triplet window (for sigma)
                 let window_map = sigma_db
@@ -1505,10 +1500,10 @@ impl Theory for DarkPhoton {
                 let sz2_map = DashMap::new();
                 for chunk in 0..num_chunks {
 
-                    // Get data vector for this chunk,
-                    let data_vector_chunk = data_vector_ct
-                    .get(&chunk)
-                    .expect("data vector should exist for every chunk");
+                    // // Get data vector for this chunk,
+                    // let data_vector_chunk = data_vector_ct
+                    // .get(&chunk)
+                    // .expect("data vector should exist for every chunk");
 
                     // Step 3: Calculate Y_k = Ainv_k * X_k for all windows in this chunk
                     let y: DashMap<Window, DarkPhotonVec<f32>> = ainv
@@ -1517,13 +1512,13 @@ impl Theory for DarkPhoton {
                             // Get triplet window and corresponding map
                             let (window, ainv_triplet) = kv2.pair();
                             
-                            // Get data vector for this window
-                            let data_vector_window = data_vector_chunk
-                                .get(&window)
+                            // Get data vector for this coh time, chunk, window
+                            let data_vector_window = data_vector
+                                .get(&(*coherence_time, chunk, *window))
                                 .expect("data vector should exist for every window");
                             
                             // (window, Ainv * Xk_)
-                            (*window, ainv_triplet.dot_vec(&*data_vector_window))
+                            (*window, ainv_triplet.dot_vec_f32(&*data_vector_window))
                             }).collect::<DashMap<_,DarkPhotonVec<f32>>>();
 
                     // Step 4: Calculate nu_ik = Ainv_k * mu_ik
@@ -1551,7 +1546,7 @@ impl Theory for DarkPhoton {
                             assert_eq!(three_blocks.high.shape(), &[5, 3]);
 
                             // We take these 5x3 blocks and assemble a 15x3 matrix
-                            let mut nu: Array2<Complex<f32>> = Array2::from_shape_fn((15, 3), |(i, j)| { 
+                            let nu: Array2<Complex<f32>> = Array2::from_shape_fn((15, 3), |(i, j)| { 
                                 match i {
                                     _i if _i < 5 => three_blocks.low[[i, j]],
                                     _i if _i < 10 => three_blocks.mid[[i-5, j]],
@@ -1603,73 +1598,66 @@ impl Theory for DarkPhoton {
                 (coherence_time, (frequency_bin, sz2_map.into_read_only()))
             }).collect();
 
-            let sz2_coherence = sz2_coherence.into_read_only();
+        let sz2_coherence = sz2_coherence.into_read_only();
 
-            // Use SZ to calculate bounds
-            let freqs_and_bounds: Vec<(f32, f32)> = sz2_coherence
-                .into_par_iter()
-                .map(|(coherence_time, (frequency_bin, sz_chunk_map))| {
+        // Use SZ to calculate bounds
+        let freqs_and_bounds: Vec<(f32, f32)> = sz2_coherence
+            .into_par_iter()
+            .map(|(coherence_time, (frequency_bin, sz_chunk_map))| {
 
-                    // Total number of chunks for this coherence time
-                    let num_chunks = num_secs / coherence_time;
+                // Total number of chunks for this coherence time
+                let num_chunks = num_secs / coherence_time;
 
-                    // let bounds = vec![];
-                    let approx_sidereal: usize = approximate_sidereal(frequency_bin);
-                    let num_fft_elements = *coherence_time;
-                    if num_fft_elements < 2*approx_sidereal + 1 {
-                        println!("no triplets exist");
-                    }
-                    let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
-                    let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
-                    let relevant_range = start_relevant..=end_relevant;
-                    log::debug!("relevant_range is {start_relevant}..={end_relevant}");
-                    let window_indices: Vec<usize> = relevant_range
-                        .into_iter()
-                        .enumerate()
-                        .map(|(window_index, _)| window_index)
-                        .collect();
-                    
-                    // Now that we have all the window indices,
-                    // for each of them collect all chunks and calculate bound
-                    let mut bounds = Vec::with_capacity(window_indices.len());
-                    for window in window_indices {
-                        // Initialize vec to hold references to sz pairs for this frequency/window
-                        let mut sz_references = Vec::<&(Array1<f32>, Array1<Complex<f32>>)>::with_capacity(num_chunks);
-                        for chunk in 0..num_chunks {
-                            sz_references.push(sz_chunk_map
-                                .get(&chunk)
-                                .expect("chunk should exist")
-                                .get(&window)
-                                .expect("window should exist")
-                            );
-                        }
-
-                        let frequency = window as f64 * frequency_bin.lower;
-                        bounds.push((frequency as f32, bound(*coherence_time, window, &sz_references)));
+                // let bounds = vec![];
+                let approx_sidereal: usize = approximate_sidereal(frequency_bin);
+                let num_fft_elements = *coherence_time;
+                if num_fft_elements < 2*approx_sidereal + 1 {
+                    println!("no triplets exist");
+                }
+                let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
+                let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
+                let relevant_range = start_relevant..=end_relevant;
+                // log::debug!("relevant_range is {start_relevant}..={end_relevant}");
+                let window_indices: Vec<usize> = relevant_range
+                    .into_iter()
+                    .enumerate()
+                    .map(|(window_index, _)| window_index)
+                    .collect();
+                
+                // Now that we have all the window indices,
+                // for each of them collect all chunks and calculate bound
+                let mut bounds = Vec::with_capacity(window_indices.len());
+                for window in window_indices {
+                    // Initialize vec to hold references to sz pairs for this frequency/window
+                    let mut sz_references = Vec::<&(Array1<f32>, Array1<Complex<f32>>)>::with_capacity(num_chunks);
+                    for chunk in 0..num_chunks {
+                        sz_references.push(sz_chunk_map
+                            .get(&chunk)
+                            .expect("chunk should exist")
+                            .get(&window)
+                            .expect("window should exist")
+                        );
                     }
 
-                    // TODO
-                    bounds
-                }).flatten().collect();
+                    let frequency = window as f64 * frequency_bin.lower;
+                    bounds.push((frequency as f32, bound(&sz_references)));
+                }
 
-                    
+                // TODO
+                bounds
+            }).flatten().collect();
 
-
-        DashMap::new()
-
+        freqs_and_bounds
     }
 }
 
 
 /// Calculates the bound for a particular (coherence_time, chunk, window)
 fn bound(
-    coherence_time: usize,
-    window: usize,
     // This collects all z and s that have the same frequency
     sz: &[&(Array1<f32>, Array1<Complex<f32>>)],
 ) -> f32 {
 
-    let normalization: f32 = 1.0;
     // The pdf is of the form N * sqrt(sum(...)) * prod(a exp(b))
     // so we will break down logpdf into summands 
     // 1) log N
@@ -1678,7 +1666,7 @@ fn bound(
     // 4) log sum(b)
     let logpdf = |norm: f32, eps: f32| {
         // Term 1: logarithm of normalization factor
-        let term_1: f32 = normalization.ln();
+        let term_1: f32 = norm.ln();
 
         // Term 2: logarithm of square root of sum, from jeffery's prior
         let term_2: f32 = sz.iter().map(|(si, _zi)| {
@@ -1798,9 +1786,9 @@ pub struct DarkPhotonVec<T: Num + Clone> {
     pub mid:  Array1<Complex<T>>,
     pub high:  Array1<Complex<T>>,
     // utility variables for assertions
-    coh_time: usize,
-    chunk: usize,
-    window: usize,
+    // coh_time: usize,
+    // chunk: usize,
+    // window: usize,
 }
 
 impl<T: Num + Clone> DarkPhotonVec<T> {
@@ -1816,24 +1804,24 @@ struct DarkPhotonMuBlock {
     block3: Array2<Complex<f32>>,
 }
 
-const DARK_PHOTON_MU_SHAPE: (usize, usize) = (15, 3);
+// const DARK_PHOTON_MU_SHAPE: (usize, usize) = (15, 3);
 
 impl DarkPhotonMu {
-    /// produces a 15 x 3 matrix out of the x, y, z components
-    fn to_matrix(&self) -> Array2<Complex<f32>> {
-        Array2::from_shape_fn(
-            DARK_PHOTON_MU_SHAPE,
-            |(j, i)| {
-                match i {
-                    0 => self.x[j],
-                    1 => self.y[j],
-                    2 => self.z[j],
-                    _ => unreachable!("only three components")
-                }
-            }
-        )
+    // /// produces a 15 x 3 matrix out of the x, y, z components
+    // fn to_matrix(&self) -> Array2<Complex<f32>> {
+    //     Array2::from_shape_fn(
+    //         DARK_PHOTON_MU_SHAPE,
+    //         |(j, i)| {
+    //             match i {
+    //                 0 => self.x[j],
+    //                 1 => self.y[j],
+    //                 2 => self.z[j],
+    //                 _ => unreachable!("only three components")
+    //             }
+    //         }
+    //     )
         
-    }
+    // }
     /// produces three 5 x 3 matrices out of the x, y, z components
     fn to_blocks(&self) -> DarkPhotonMuBlock {
         let block1 = Array2::from_shape_fn(
@@ -1881,26 +1869,28 @@ impl DarkPhotonMu {
     }
 }
 
-#[test]
-fn test_to_matrix() {
-    let dpmu = DarkPhotonMu {
-        x: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| x.into()),
-        y: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| (-x).into()),
-        z: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x|  I * x),
-    };
-    let matrix: Array2<Complex<f32>> = array![
-        [1.0_f32 * ONE, 2.0 * ONE, 3.0 * ONE, 4.0 * ONE, 5.0 * ONE, 6.0 * ONE, 7.0 * ONE, 8.0 * ONE, 9.0 * ONE, 10.0 * ONE, 11.0 * ONE, 12.0 * ONE, 13.0 * ONE, 14.0 * ONE, 15.0 * ONE],
-        [-1.0_f32 * ONE, -2.0 * ONE, -3.0 * ONE, -4.0 * ONE, -5.0 * ONE, -6.0 * ONE, -7.0 * ONE, -8.0 * ONE, -9.0 * ONE, -10.0 * ONE, -11.0 * ONE, -12.0 * ONE, -13.0 * ONE, -14.0 * ONE, -15.0 * ONE],
-        [1.0_f32 * I, 2.0 * I, 3.0 * I, 4.0 * I, 5.0 * I, 6.0 * I, 7.0 * I, 8.0 * I, 9.0 * I, 10.0 * I, 11.0 * I, 12.0 * I, 13.0 * I, 14.0 * I, 15.0 * I]
-    ];
-    assert_eq!(
-        dpmu.to_matrix(),
-        matrix,
-    );
-}
+// #[test]
+// fn test_to_matrix() {
+//     use ndarray::array;
+//     let dpmu = DarkPhotonMu {
+//         x: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| x.into()),
+//         y: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| (-x).into()),
+//         z: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x|  I * x),
+//     };
+//     let matrix: Array2<Complex<f32>> = array![
+//         [1.0_f32 * ONE, 2.0 * ONE, 3.0 * ONE, 4.0 * ONE, 5.0 * ONE, 6.0 * ONE, 7.0 * ONE, 8.0 * ONE, 9.0 * ONE, 10.0 * ONE, 11.0 * ONE, 12.0 * ONE, 13.0 * ONE, 14.0 * ONE, 15.0 * ONE],
+//         [-1.0_f32 * ONE, -2.0 * ONE, -3.0 * ONE, -4.0 * ONE, -5.0 * ONE, -6.0 * ONE, -7.0 * ONE, -8.0 * ONE, -9.0 * ONE, -10.0 * ONE, -11.0 * ONE, -12.0 * ONE, -13.0 * ONE, -14.0 * ONE, -15.0 * ONE],
+//         [1.0_f32 * I, 2.0 * I, 3.0 * I, 4.0 * I, 5.0 * I, 6.0 * I, 7.0 * I, 8.0 * I, 9.0 * I, 10.0 * I, 11.0 * I, 12.0 * I, 13.0 * I, 14.0 * I, 15.0 * I]
+//     ];
+//     assert_eq!(
+//         dpmu.to_matrix(),
+//         matrix,
+//     );
+// }
 
 #[test]
 fn test_to_blocks() {
+    use ndarray::array;
     let dpmu = DarkPhotonMu {
         x: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| x.into()),
         y: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| (-x).into()),
@@ -2038,12 +2028,12 @@ pub struct Triplet {
     pub mid: Array2<Complex<f32>>,
     pub high: Array2<Complex<f32>>,
     // TODO: add something like this to ensure we are only multiplying the correct frequencies
-    pub lowf: f32,
+    // pub lowf: f32,
     pub midf: f32,
-    pub hif: f32,
-    pub coh_time: usize,
-    pub chunk: usize,
-    pub window: Option<usize>
+    // pub hif: f32,
+    // pub coh_time: usize,
+    // pub chunk: usize,
+    // pub window: Option<usize>
 }
 
 impl Triplet {
@@ -2052,53 +2042,54 @@ impl Triplet {
             low: self.low.dot(&arrays[0]),
             mid: self.mid.dot(&arrays[1]),
             high: self.high.dot(&arrays[2]),
-            lowf: self.lowf,
+            // lowf: self.lowf,
             midf: self.midf,
-            hif: self.hif,
-            coh_time: self.coh_time,
-            chunk: self.chunk,
-            window: self.window,
+            // hif: self.hif,
+            // coh_time: self.coh_time,
+            // chunk: self.chunk,
+            // window: self.window,
         }
     }
-    /// Applies the map to every entry in every block
-    fn map<F>(&self, f: F) -> Triplet
-    where
-        F: Fn(&Complex<f32>) -> Complex<f32>
-    {
-        Triplet {
-            low: self.low.map(&f),
-            mid: self.mid.map(&f),
-            high: self.high.map(&f),
-            lowf: self.lowf,
-            midf: self.midf,
-            hif: self.hif,
-            coh_time: self.coh_time,
-            chunk: self.chunk,
-            window: self.window,
-        }
-    }
+    // /// Applies the map to every entry in every block
+    // fn map<F>(&self, f: F) -> Triplet
+    // where
+    //     F: Fn(&Complex<f32>) -> Complex<f32>
+    // {
+    //     Triplet {
+    //         low: self.low.map(&f),
+    //         mid: self.mid.map(&f),
+    //         high: self.high.map(&f),
+    //         // lowf: self.lowf,
+    //         midf: self.midf,
+    //         // hif: self.hif,
+    //         // coh_time: self.coh_time,
+    //         // chunk: self.chunk,
+    //         // window: self.window,
+    //     }
+    // }
+    // /// This takes the [Triplet] self and multipled a [DarkPhotonVec] to produce another [DarkPhotonVec]
+    // /// via matrix multiplication, i.e. A.x = y
+    // fn dot_vec(&self, vecs: &DarkPhotonVec<f64>) -> DarkPhotonVec<f32> {
+    //     DarkPhotonVec {
+    //         low: self.low.dot(&vecs.low.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
+    //         mid: self.mid.dot(&vecs.mid.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
+    //         high: self.high.dot(&vecs.high.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
+    //         // coh_time: vecs.coh_time,
+    //         // window: vecs.window,
+    //         // chunk: vecs.chunk,
+    //     }
+    // }
+
     /// This takes the [Triplet] self and multipled a [DarkPhotonVec] to produce another [DarkPhotonVec]
     /// via matrix multiplication, i.e. A.x = y
-    fn dot_vec(&self, vecs: &DarkPhotonVec<f64>) -> DarkPhotonVec<f32> {
-        DarkPhotonVec {
-            low: self.low.dot(&vecs.low.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
-            mid: self.mid.dot(&vecs.mid.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
-            high: self.high.dot(&vecs.high.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
-            coh_time: vecs.coh_time,
-            window: vecs.window,
-            chunk: vecs.chunk,
-        }
-    }
-    /// This takes the [Triplet] self and multipled a [DarkPhotonVec] to produce another [DarkPhotonVec]
-    /// via matrix multiplication, i.e. A.x = y
-    fn dot_vec_32(&self, vecs: &DarkPhotonVec<f32>) -> DarkPhotonVec<f32> {
+    fn dot_vec_f32(&self, vecs: &DarkPhotonVec<f32>) -> DarkPhotonVec<f32> {
         DarkPhotonVec {
             low: self.low.dot(&vecs.low),
             mid: self.mid.dot(&vecs.mid),
             high: self.high.dot(&vecs.high),
-            coh_time: vecs.coh_time,
-            window: vecs.window,
-            chunk: vecs.chunk,
+            // coh_time: vecs.coh_time,
+            // window: vecs.window,
+            // chunk: vecs.chunk,
         }
     }
 
@@ -2111,12 +2102,12 @@ impl Triplet {
             low: self.low.inv().expect("failed matrix inversion"),
             mid: self.mid.inv().expect("failed matrix inversion"),
             high: self.high.inv().expect("failed matrix inversion"),
-            lowf: self.lowf,
+            // lowf: self.lowf,
             midf: self.midf,
-            hif: self.hif,
-            coh_time: self.coh_time,
-            chunk: self.chunk,
-            window: self.window,
+            // hif: self.hif,
+            // coh_time: self.coh_time,
+            // chunk: self.chunk,
+            // window: self.window,
         }
     }
     /// Performs lower cholesky decomposition on every block in the triplet,
@@ -2129,80 +2120,80 @@ impl Triplet {
             low: self.low.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
             mid: self.mid.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
             high: self.high.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
-            lowf: self.lowf,
+            // lowf: self.lowf,
             midf: self.midf,
-            hif: self.hif,
-            coh_time: self.coh_time,
-            chunk: self.chunk,
-            window: self.window,
+            // hif: self.hif,
+            // coh_time: self.coh_time,
+            // chunk: self.chunk,
+            // window: self.window,
         }
     }
 
-    /// Performs singular value decomposition on every block in the triplet,
-    /// panicking if it failed.
-    /// NOTE: The singular value decomposition of a block diagonal matrix is equal to a 
-    /// block diagonal matrix with the singular value decomposition of the blocks. As such,
-    /// we can do this for every triplet element independently.
-    /// 
-    /// TODO: ensure the middle array is correct (i.e. not transposed)
-    fn block_svd(&self) -> (Triplet, Array2<f32>, Triplet) {
-        let (ulow, slow, vlow) = self.low.svd(true, true).expect("svd failed");
-        let (umid, smid, vmid) = self.mid.svd(true, true).expect("svd failed");
-        let (uhigh, shigh, vhigh) = self.high.svd(true, true).expect("svd failed");
-        (Triplet {
-            low: ulow.expect("requested u"),
-            mid: umid.expect("requested u"),
-            high: uhigh.expect("requested u"),
-            lowf: self.lowf,
-            midf: self.midf,
-            hif: self.hif,
-            coh_time: self.coh_time,
-            chunk: self.chunk,
-            window: self.window,
-        },
-        Array2::from_shape_vec((3, 3), slow.into_iter().chain(smid.into_iter()).chain(shigh.into_iter()).collect()).expect("should be correct shape"),
-        Triplet {
-            low: vlow.expect("requested v"),
-            mid: vmid.expect("requested v"),
-            high: vhigh.expect("requested v"),
-            lowf: self.lowf,
-            midf: self.midf,
-            hif: self.hif,
-            coh_time: self.coh_time,
-            chunk: self.chunk,
-            window: self.window,
-        })
-    }
+    // /// Performs singular value decomposition on every block in the triplet,
+    // /// panicking if it failed.
+    // /// NOTE: The singular value decomposition of a block diagonal matrix is equal to a 
+    // /// block diagonal matrix with the singular value decomposition of the blocks. As such,
+    // /// we can do this for every triplet element independently.
+    // /// 
+    // /// TODO: ensure the middle array is correct (i.e. not transposed)
+    // fn block_svd(&self) -> (Triplet, Array2<f32>, Triplet) {
+    //     let (ulow, slow, vlow) = self.low.svd(true, true).expect("svd failed");
+    //     let (umid, smid, vmid) = self.mid.svd(true, true).expect("svd failed");
+    //     let (uhigh, shigh, vhigh) = self.high.svd(true, true).expect("svd failed");
+    //     (Triplet {
+    //         low: ulow.expect("requested u"),
+    //         mid: umid.expect("requested u"),
+    //         high: uhigh.expect("requested u"),
+    //         // lowf: self.lowf,
+    //         midf: self.midf,
+    //         // hif: self.hif,
+    //         // coh_time: self.coh_time,
+    //         // chunk: self.chunk,
+    //         // window: self.window,
+    //     },
+    //     Array2::from_shape_vec((3, 3), slow.into_iter().chain(smid.into_iter()).chain(shigh.into_iter()).collect()).expect("should be correct shape"),
+    //     Triplet {
+    //         low: vlow.expect("requested v"),
+    //         mid: vmid.expect("requested v"),
+    //         high: vhigh.expect("requested v"),
+    //         // lowf: self.lowf,
+    //         midf: self.midf,
+    //         // hif: self.hif,
+    //         // coh_time: self.coh_time,
+    //         // chunk: self.chunk,
+    //         // window: self.window,
+    //     })
+    // }
 
-    /// Tranposes and conjugates every block
-    fn dagger(&self) -> Self {
-        Triplet {
-            low: self.low.t().map(|c| c.conj()),
-            mid: self.mid.t().map(|c| c.conj()),
-            high: self.high.t().map(|c| c.conj()),
-            lowf: self.lowf,
-            midf: self.midf,
-            hif: self.hif,
-            coh_time: self.coh_time,
-            chunk: self.chunk,
-            window: self.window,
-        }
-    }
+    // /// Tranposes and conjugates every block
+    // fn dagger(&self) -> Self {
+    //     Triplet {
+    //         low: self.low.t().map(|c| c.conj()),
+    //         mid: self.mid.t().map(|c| c.conj()),
+    //         high: self.high.t().map(|c| c.conj()),
+    //         // lowf: self.lowf,
+    //         midf: self.midf,
+    //         // hif: self.hif,
+    //         // coh_time: self.coh_time,
+    //         // chunk: self.chunk,
+    //         // window: self.window,
+    //     }
+    // }
 
-    /// Scale all blocks by the same scalar factor
-    fn scale(&self, factor: f32) -> Self {
-        Self {
-            low: (&self.low).mul(factor),
-            mid: (&self.mid).mul(factor),
-            high: (&self.high).mul(factor),
-            lowf: self.lowf,
-            midf: self.midf,
-            hif: self.hif,
-            coh_time: self.coh_time,
-            chunk: self.chunk,
-            window: self.window,
-        }
-    }
+    // /// Scale all blocks by the same scalar factor
+    // fn scale(&self, factor: f32) -> Self {
+    //     Self {
+    //         low: (&self.low).mul(factor),
+    //         mid: (&self.mid).mul(factor),
+    //         high: (&self.high).mul(factor),
+    //         // lowf: self.lowf,
+    //         midf: self.midf,
+    //         // hif: self.hif,
+    //         // coh_time: self.coh_time,
+    //         // chunk: self.chunk,
+    //         // window: self.window,
+    //     }
+    // }
 }
 
 // #[derive(Serialize, Deserialize, Clone, Copy)]

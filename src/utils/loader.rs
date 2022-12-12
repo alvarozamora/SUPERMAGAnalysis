@@ -1,3 +1,6 @@
+use super::igrf_decl::{
+    apply_rotation_f1, apply_rotation_f2, Declinations, IGRF_DATA_INTERPOLATOR,
+};
 use crate::constants::*;
 use crate::theory::NonzeroElement;
 use crate::utils::coordinates::*;
@@ -7,6 +10,7 @@ use anyhow::Result;
 use dashmap::DashMap;
 use futures::future::join_all;
 use glob::glob;
+use interp1d::Interp1d;
 use ndarray::Axis;
 use ndarray::{arr1, Array1};
 use rayon::iter::*;
@@ -184,6 +188,9 @@ impl DailyDatasetLoader {
         // Find all stations for which there is data for this day
         let station_files = retrieve_stations_daily(day);
 
+        // Initialize declination interpolator
+        let declinations_interpolator = Declinations::load();
+
         DailyDatasetLoader {
             coordinate_map,
             station_files,
@@ -196,6 +203,9 @@ impl DailyDatasetLoader {
     pub fn change_to_day(self, day: usize) -> Result<Self> {
         // Find all stations for which there is data for this year
         let station_files = retrieve_stations_daily(day);
+
+        // Initialize declination interpolator
+        let declinations_interpolator = Declinations::load();
 
         if station_files.len() > 0 {
             Ok(DailyDatasetLoader {
@@ -279,6 +289,7 @@ impl DailyDatasetLoader {
 pub struct Chunk {
     station: StationName,
     files: Vec<PathBuf>,
+    start_sec: usize,
 }
 
 /// This `DatasetLoader` is intended to be used to gather 1s data in chunks (integer number of days).
@@ -291,6 +302,7 @@ pub struct DatasetLoader {
     pub semivalid_chunks: Arc<DashMap<Index, Vec<Chunk>>>,
     days: Range<usize>,
     chunk_size_in_days: usize,
+    declinations_interpolator: Declinations,
     // chunk: usize,
 }
 
@@ -309,11 +321,15 @@ impl DatasetLoader {
         // Find all stations for which there is data for this year
         let semivalid_chunks = retrieve_chunks(days.clone(), coherence_time_in_days);
 
+        // Initialize declination interpolator
+        let declinations_interpolator = Declinations::load();
+
         Self {
             coordinate_map,
             semivalid_chunks,
             days: days.unwrap_or(DATA_DAYS),
             chunk_size_in_days: coherence_time_in_days,
+            declinations_interpolator,
         }
     }
 
@@ -339,6 +355,7 @@ impl DatasetLoader {
                             .get(2)
                             .unwrap()
                             .to_string();
+                        let declinations = &self.declinations_interpolator;
                         tokio::spawn(_load_chunk(
                             index,
                             chunk.clone(),
@@ -384,7 +401,7 @@ async fn _load_chunk(index: Index, chunk: Chunk, coordinates: Coordinates) -> Da
     let mut datasets: Vec<[TimeSeries; 3]> = join_all(dataset_futures).await;
 
     // Concatenate datasets
-    let [field_1, field_2, field_3]: [TimeSeries; 3] = {
+    let [mut field_1, mut field_2, field_3]: [TimeSeries; 3] = {
         let combined_dataset = datasets
             .iter_mut()
             .fold(Dataset::default(), |mut acc, dataset| {
@@ -398,6 +415,30 @@ async fn _load_chunk(index: Index, chunk: Chunk, coordinates: Coordinates) -> Da
             combined_dataset.field_2,
             combined_dataset.field_3,
         ]
+    };
+
+    // Rotate fields: this has to be done simultaneously otherwise
+    // new values will be used to rotate the second field.
+    //
+    // First get interpolator
+    let interpolator = IGRF_DATA_INTERPOLATOR.interpolator(&chunk.station);
+    (field_1, field_2) = match field_1
+        .into_iter()
+        .zip(field_2.into_iter())
+        .enumerate()
+        .map(|(sec, (f1, f2))| {
+            // Interpolate declination to this second
+            let sec_declination = interpolator.interpolate_checked(sec as f64).unwrap();
+            // Apply rotations
+            (
+                apply_rotation_f1(f1, f2, sec_declination as f32),
+                apply_rotation_f2(f1, f2, sec_declination as f32),
+            )
+        })
+        .unzip()
+    {
+        // Convert vecs to arrays
+        (vec1, vec2) => (Array1::from_vec(vec1), Array1::from_vec(vec2)),
     };
 
     Dataset {
@@ -479,12 +520,16 @@ fn retrieve_chunks(
                         .map(|day| PathBuf::from(format!("{}/{day}", station.display())))
                         .collect();
 
+                    // Get the second at which this chunk begins
+                    let start_sec = index * chunk_size_in_days * SECONDS_PER_DAY;
+
                     // Then check if they all exist
                     if files.iter().all(|file| station_days.contains(file)) {
                         // If so, return `Chunk`
                         Some(Chunk {
                             station: station.display().to_string(),
                             files,
+                            start_sec,
                         })
                     } else {
                         // Otherwise, don't include this station for this chunk

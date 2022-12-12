@@ -16,7 +16,7 @@ fn main() {
     // let days_to_use = day_since_first(0, 2004)..day_since_first(0, 2020);
 
     // Start Balancer
-    let mut balancer = Balancer::new(32, 5);
+    let mut balancer = Balancer::new(32, 2);
 
     // Initialize Theory
     let theory = DarkPhoton::initialize(1.0);

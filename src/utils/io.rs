@@ -75,12 +75,12 @@ async fn test_connect_add_change() {
                     low: Array2::zeros((0, 0)),
                     mid: Array2::zeros((0, 0)),
                     high: Array2::zeros((0, 0)),
-                    lowf: 1.0,
+                    // lowf: 1.0,
                     midf: 1.1,
-                    hif: 1.2,
-                    coh_time: 0,
-                    window: Some(0),
-                    chunk: 0,
+                    // hif: 1.2,
+                    // coh_time: 0,
+                    // window: Some(0),
+                    // chunk: 0,
                 },
             )]
             .into_iter()

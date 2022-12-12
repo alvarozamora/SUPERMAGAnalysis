@@ -1,6 +1,6 @@
-use std::collections::HashMap;
-use serde_derive::Deserialize;
 use csv;
+use serde_derive::Deserialize;
+use std::collections::HashMap;
 
 type StationName = String;
 
@@ -11,7 +11,6 @@ pub struct StationCsvEntry {
     latitude: f64,
 }
 
-
 #[derive(Debug, Deserialize, PartialEq, Copy, Clone)]
 pub struct Coordinates {
     pub longitude: f64,
@@ -19,31 +18,32 @@ pub struct Coordinates {
     pub polar: f64,
 }
 
-
 /// Location of csv file containing station coordinates
 pub const COORD_CSV_FILEPATH: &str = "./src/utils/coordinates.csv";
 
-/// This function reads in the .csv file containing the station coordinates. 
+/// This function reads in the .csv file containing the station coordinates.
 /// This constructor function is preferred over hardcoding station coordinates
 /// in case an updated file is used in the future.
 pub fn construct_coordinate_map() -> HashMap<StationName, Coordinates> {
-
     // Load coordinates.csv file
     let mut reader = csv::ReaderBuilder::new()
         .has_headers(false)
-        .from_path(COORD_CSV_FILEPATH).expect(format!("Failed to open file at {}", COORD_CSV_FILEPATH).as_str());
+        .from_path(COORD_CSV_FILEPATH)
+        .expect(format!("Failed to open file at {}", COORD_CSV_FILEPATH).as_str());
 
     // Initialize Hashmap
     let mut hash_map = HashMap::new();
 
     // Add station coordinates to hashmap
     for row in reader.deserialize::<StationCsvEntry>() {
-        
         // Convert the (name, f64, f64) to (name, coordinate)
         let (name, coordinate) = row.expect("CSV file row format is invalid").to_map_entry();
 
         // .insert() returns None if the key was not already in the hash map
-        assert!(hash_map.insert(name, coordinate).is_none(), "Attempted to insert duplicate station");
+        assert!(
+            hash_map.insert(name, coordinate).is_none(),
+            "Attempted to insert duplicate station"
+        );
     }
 
     hash_map
@@ -51,7 +51,6 @@ pub fn construct_coordinate_map() -> HashMap<StationName, Coordinates> {
 
 #[test]
 fn construct_coord_map() {
-
     // Construct the hash map
     let hash_map = construct_coordinate_map();
 
@@ -61,7 +60,7 @@ fn construct_coord_map() {
         &Coordinates {
             longitude: 7.39,
             latitude: 8.99,
-            polar: 8.99 + std::f64::consts::FRAC_PI_2
+            polar: std::f64::consts::FRAC_PI_2 - 8.99
         },
         "Failed to construct A01 properly based on CSV as of May 23, 2022"
     );
@@ -73,6 +72,13 @@ trait ToMapEntry {
 
 impl ToMapEntry for StationCsvEntry {
     fn to_map_entry(self) -> (StationName, Coordinates) {
-        (self.name, Coordinates { longitude: self.longitude, latitude: self.latitude, polar: self.latitude + std::f64::consts::FRAC_PI_2 })
+        (
+            self.name,
+            Coordinates {
+                longitude: self.longitude,
+                latitude: self.latitude,
+                polar: std::f64::consts::FRAC_PI_2 - self.latitude,
+            },
+        )
     }
 }

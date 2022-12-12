@@ -1,9 +1,10 @@
-use csv::{ReaderBuilder, StringRecord, Trim};
-use dashmap::DashMap;
-use interp::interp;
-use serde_derive::Deserialize;
+use dashmap::{DashMap, ReadOnlyView};
+use interp1d::Interp1d;
+use itertools::Itertools;
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+use std::f64::consts::PI;
 use std::fs::File;
-use std::io::{self, BufRead, BufReader};
+use std::io::{BufRead, BufReader};
 
 use crate::constants::SECONDS_PER_DAY;
 
@@ -25,78 +26,103 @@ const IGRF_DATA_FILE: &str = "./src/IGRF_declinations_for_1sec.txt";
 // }
 
 lazy_static! {
-    pub static ref IGRF_DATA_INTERPOLATOR: Declinations = load_igrf_data();
+    pub static ref IGRF_DATA_INTERPOLATOR: Declinations = Declinations::load();
 }
 
 pub struct Declinations {
-    pub inner: DashMap<StationName, (Vec<SecFloat>, Vec<Declination>)>,
+    pub inner: ReadOnlyView<StationName, Interp1d<f64, f64>>,
 }
+impl Declinations {
+    pub fn load() -> Declinations {
+        // Initialize return value
+        let inner = DashMap::new();
 
-fn load_igrf_data() -> Declinations {
-    // Initialize return value
-    let inner = DashMap::new();
+        // Iterate through lines, skipping header
+        let file = File::open(IGRF_DATA_FILE).expect("IGRF_DATA_FILE should exist");
+        let buf_reader = BufReader::new(file);
+        let entries: Vec<(usize, String, f64, f64, f64)> = buf_reader
+            .lines()
+            .skip(1)
+            .map(|line| {
+                // Iterator over entries in the line
+                let line = line.unwrap();
+                let mut entries = line.split_whitespace();
 
-    // Iterate through lines, skipping header
-    let file = File::open(IGRF_DATA_FILE).expect("IGRF_DATA_FILE should exist");
-    let buf_reader = BufReader::new(file);
-    let entries: Vec<(usize, String, f64, f64, f64)> = buf_reader
-        .lines()
-        .skip(1)
-        .map(|line| {
-            // Iterator over entries in the line
-            let line = line.unwrap();
-            let mut entries = line.split_whitespace();
-
-            // Construct tuple
-            (
-                entries.next().unwrap().parse().unwrap(),
-                entries.next().unwrap().to_owned(),
-                entries.next().unwrap().parse().unwrap(),
-                entries.next().unwrap().parse().unwrap(),
-                entries.next().unwrap().parse().unwrap(),
-            )
-        })
-        .collect();
-    //     // .multiunzip();
-
-    // let mut rdr = ReaderBuilder::new()
-    //     .has_headers(true)
-    //     // .trim(Trim::All)
-    //     .flexible(true)
-    //     .delimiter(b' ')
-    //     .from_path(IGRF_DATA_FILE)
-    //     .expect("IGRF_DATA_FILE should exist");
-
-    // let other_entries = rdr
-    //     .deserialize::<IgrfDataLine>()
-    //     .collect::<Result<Vec<IgrfDataLine>, csv::Error>>().unwrap();
-    // println!("{other_entries:?}");
-
-    for (year, station, _geolat, _geolon, declination) in entries {
-        inner
-            .entry(station)
-            .and_modify(|map: &mut (Vec<SecFloat>, Vec<Declination>)| {
-                map.0.push(convert_entry_year_to_sec_float(year));
-                map.1.push(declination);
+                // Construct tuple
+                (
+                    entries.next().unwrap().parse().unwrap(),
+                    entries.next().unwrap().to_owned(),
+                    entries.next().unwrap().parse().unwrap(),
+                    entries.next().unwrap().parse().unwrap(),
+                    entries.next().unwrap().parse().unwrap(),
+                )
             })
-            .or_insert((
-                vec![convert_entry_year_to_sec_float(year)],
-                vec![declination],
-            ));
+            .collect();
+        //     // .multiunzip();
+
+        // let mut rdr = ReaderBuilder::new()
+        //     .has_headers(true)
+        //     // .trim(Trim::All)
+        //     .flexible(true)
+        //     .delimiter(b' ')
+        //     .from_path(IGRF_DATA_FILE)
+        //     .expect("IGRF_DATA_FILE should exist");
+
+        // let other_entries = rdr
+        //     .deserialize::<IgrfDataLine>()
+        //     .collect::<Result<Vec<IgrfDataLine>, csv::Error>>().unwrap();
+        // println!("{other_entries:?}");
+
+        for (year, station, _geolat, _geolon, declination) in entries {
+            // Convert declinations from degrees to radians
+            let declination = declination * PI / 180.0;
+
+            // Add declination (radians) to map
+            inner
+                .entry(station)
+                .and_modify(|map: &mut (Vec<SecFloat>, Vec<Declination>)| {
+                    map.0.push(convert_entry_year_to_sec_float(year));
+                    map.1.push(declination);
+                })
+                .or_insert((
+                    vec![convert_entry_year_to_sec_float(year)],
+                    vec![declination],
+                ));
+        }
+
+        let inner = inner
+            .into_par_iter()
+            .map_with((), |_, (station_name, (secs, declinations))| {
+                // Sort declinations for this station
+                let (secs, declinations) = secs
+                    .into_iter()
+                    .zip(declinations.into_iter())
+                    .sorted_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                    .unzip();
+                // Construct key-value pair with interp1d
+                (
+                    station_name,
+                    Interp1d::new_sorted(secs, declinations)
+                        .expect("failed to create interpolator"),
+                )
+            })
+            .collect::<DashMap<_, _>>()
+            .into_read_only();
+
+        Declinations { inner }
     }
 
-    Declinations { inner }
-}
+    // Return a reference to the station interpolator
+    pub fn interpolator(&self, station: &String) -> &Interp1d<f64, f64> {
+        self.inner.get(station).expect("station should exist")
+    }
 
-impl Declinations {
-    /// NOTE: This is presently done very inefficiently (interp),
-    /// but is probably not worth optimizing.
     pub fn interpolate(&self, station: String, sec: usize) -> Declination {
         // Get x and y vecs
-        let station_data = self.inner.get(&station).unwrap();
+        let interpolator = self.interpolator(&station);
 
         // Intepolate
-        interp(&station_data.0, &station_data.1, sec as f64)
+        interpolator.interpolate_checked(sec as f64).expect("out of bounds")
     }
 }
 
@@ -109,6 +135,23 @@ fn convert_entry_year_to_sec_float(year: usize) -> SecFloat {
     let sec: usize = day * SECONDS_PER_DAY + 1;
 
     sec as SecFloat
+}
+
+// #[inline(always)]
+// fn apply_rotation(f1: f32, f2: f32, theta: f32) -> (f32, f32) {
+//     (
+//         f1 * (theta).cos() - f2 * (theta).sin(),
+//         f1 * (theta).sin() + f2 * (theta).cos(),
+//     )
+// }
+#[inline(always)]
+pub(crate) fn apply_rotation_f1(f1: f32, f2: f32, theta: f32) -> f32 {
+    f1 * (theta).cos() - f2 * (theta).sin()
+}
+
+#[inline(always)]
+pub(crate) fn apply_rotation_f2(f1: f32, f2: f32, theta: f32) -> f32 {
+    f1 * (theta).sin() + f2 * (theta).cos()
 }
 
 #[test]

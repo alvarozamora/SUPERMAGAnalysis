@@ -5,38 +5,19 @@ use crate::{
     utils::async_balancer::*,
     theory::*,
 };
-use itertools::Itertools;
-use mpi::{topology::Communicator, traits::Root};
-use ndarray::{s, Array1, arr1, ArrayViewMut, Array2};
+use mpi::{topology::Communicator};
+use ndarray::{s, Array1};
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
 use tokio::{fs::File, io::AsyncWriteExt};
 use std::{sync::Arc, ops::{RangeInclusive, Add}, error::Error, marker::PhantomData};
-use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::ops::AddAssign;
 use dashmap::try_result::TryResult;
 use std::ops::Range;
-use rayon::iter::{ParallelIterator, IntoParallelIterator, IntoParallelRefIterator};
+use rayon::iter::{ParallelIterator};
 use mpi::point_to_point::{Source, Destination};
-use ndrustfft::{ndfft_r2c, Complex, R2cFftHandler};
 
-use log::*;
-
-macro_rules! debug {
-    ($($e:expr),+) => {
-        {
-            #[cfg(debug_assertions)]
-            {
-                dbg!($($e),+)
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                ($($e),+)
-            }
-        }
-    };
-}
 
 macro_rules! debug_print {
     ($($e:expr),+) => {
@@ -58,7 +39,6 @@ type Index = usize;
 type Weight = f32;
 type StationName = String;
 type TimeSeries = Array1<f32>;
-type ComplexSeries = Array1<ndrustfft::Complex<f32>>;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct FrequencyBin {
@@ -638,7 +618,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         projections_complete_struct: Arc<ProjectionsComplete>,
         auxiliary_complete: Arc<<T as Theory>::AuxiliaryValue>,
         theory: &T,
-        // balancer: &mut Manager<()>,
+        balancer: &mut Manager<()>,
     ) -> Result<(), Box<dyn Error>> {
 
         // Retrieve series and days used from ProjectionsComplete
@@ -657,41 +637,51 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         let frequency_bins: Vec<FrequencyBin> = frequencies_from_coherence_times(&coherence_times);
 
         // Partition zipped(coherence_times, frequency_bins) over ranks
-        // let local_set: Vec<(usize, FrequencyBin)> = balancer
-        //     .local_set(
-        //         &coherence_times
-        //         .iter()
-        //         .cloned()
-        //         .zip(frequency_bins)
-        //         .collect()
-        //     );
+        let local_set: Vec<(usize, FrequencyBin)> = balancer
+            .local_set(
+                &coherence_times
+                .iter()
+                .cloned()
+                .zip(frequency_bins)
+                .collect()
+            );
+        log::debug!("local_set consists of {} elements", local_set.len());
 
-        let set =  coherence_times
-            .iter()
-            .cloned()
-            .zip(frequency_bins)
-            .collect();
+        // let set =  coherence_times
+        //     .iter()
+        //     .cloned()
+        //     .zip(frequency_bins)
+        //     .collect();
 
         // // Calculate data vector for this local set.
-        // let data_vector_dashmap = theory
-        //     // .calculate_data_vector(&projections_complete, &local_set);
-        //     .calculate_data_vector(&projections_complete, &set);
-        // log::debug!("finished data vector");
+        let data_vector_dashmap = theory
+            // .calculate_data_vector(&projections_complete, &local_set);
+            .calculate_data_vector(&projections_complete_struct, &local_set);
+        log::debug!("finished data vector");
         
         // // Calculate the theory mean
-        // let theory_mean = theory
-        //     // .calculate_mean_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
-        //     .calculate_mean_theory(&set, total_secs, coherence_times.len(), Arc::clone(&auxiliary_complete));
-        // log::debug!("finished mean");
+        let theory_mean = theory
+            // .calculate_mean_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
+            .calculate_mean_theory(&local_set, total_secs, coherence_times.len(), Arc::clone(&auxiliary_complete));
+        log::debug!("finished mean");
 
         // Calculate the theory var
         let theory_var = theory
             // .calculate_var_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
-            .calculate_var_theory(&set, &projections_complete_struct, coherence_times.len(), days, stationarity, auxiliary_complete);
+            .calculate_var_theory(&local_set, &projections_complete_struct, coherence_times.len(), days.clone(), stationarity, auxiliary_complete);
         log::debug!("finished var");
+        drop(theory_var);
+
+        // Calculate bounds
+        let bounds = theory
+            .calculate_likelihood(&local_set, &projections_complete_struct, &data_vector_dashmap, &theory_mean, coherence_times.len(), days, stationarity);
+        log::debug!("finished bounds");
         
 
         // println!("{} {} {} elements", data_vector_dashmap.len(), theory_mean.len(), theory_var.len());
+        for (freq, bound) in bounds {
+            println!("{freq} {bound}");
+        }
 
         Ok(())
     }
