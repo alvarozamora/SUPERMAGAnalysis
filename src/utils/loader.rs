@@ -496,13 +496,6 @@ fn retrieve_chunks(
     let semivalid_chunks = Arc::new(DashMap::new());
 
     // Iterate through every chunk of days
-    // TODO: cleanup. this was used for stationarity = some number of days
-    // days.unwrap_or(DATA_DAYS)
-    //     .step_by(chunk_size_in_days)
-    //     .map(|x| (x..).take(chunk_size_in_days))
-    //     .collect::<Vec<_>>()
-    //     .into_par_iter()
-    //     .enumerate()
     stationarity
         .get_chunks()
         .into_iter()
