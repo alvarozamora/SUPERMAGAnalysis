@@ -198,7 +198,7 @@ impl Theory for DarkPhoton {
                             // Get relevant vec_sph_fn
                             let vec_sph_fn = self.vec_sph_fns.get(&nonzero_element).unwrap();
 
-                            // TODO: Change these to match definitions in the paper
+                            // These were commented out to match definitions in the paper
                             // let relevant_vec_sph = match component {
                             //     Component::PolarReal =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[0].re,
                             //     Component::PolarImag =>  vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32).phi[0].im,
