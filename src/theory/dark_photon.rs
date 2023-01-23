@@ -1673,7 +1673,7 @@ fn bound(
         // Term 3: log sum(a)
         let term_3: f32 = sz.iter().map(|(si, _zi)| {
             si.iter().map(|sik| {
-                ((3.0 + eps.powi(2) * sik.powi(2)).powi(2)).ln()
+                - ((3.0 + eps.powi(2) * sik.powi(2)).powi(2)).ln()
             }).sum::<f32>()
         }).sum();
 
@@ -1684,7 +1684,7 @@ fn bound(
             for j in 0..sz.len() {
                 let (sj, zj) = sz[j];
                 for i in 0..3 {
-                    acc += 3.0 * zj[i].norm_sqr() / (3.0 + eps.powi(2) * sj[i].powi(2));
+                    acc -= 3.0 * zj[i].norm_sqr() / (3.0 + eps.powi(2) * sj[i].powi(2));
                 }
             }
             acc
