@@ -1260,6 +1260,7 @@ impl Theory for DarkPhoton {
                 let len_data = secs.len();
 
                 // Then, get each of the coherence chunks
+                // TODO: last chunk
                 let num_chunks = len_data / coherence_time;
                 
                 
@@ -1470,6 +1471,7 @@ impl Theory for DarkPhoton {
             .map(|(coherence_time, frequency_bin)| {
 
                 // Get number of chunks for this coherence time
+                // TODO: last chunk
                 let num_chunks = num_secs / coherence_time;
 
                 // Get theory mean for this coherence time
@@ -1605,6 +1607,7 @@ impl Theory for DarkPhoton {
             .map(|(coherence_time, (frequency_bin, sz_chunk_map))| {
 
                 // Total number of chunks for this coherence time
+                // TODO: last chunk
                 let num_chunks = num_secs / coherence_time;
 
                 // let bounds = vec![];
