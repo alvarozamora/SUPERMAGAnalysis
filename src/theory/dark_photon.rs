@@ -1166,7 +1166,6 @@ impl Theory for DarkPhoton {
 
                 // Initialize dashmap for correlation
                 let chunk_ffts_squared: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DashMap::new();
-                let nancount = 0;
                 for (e1, fft1) in chunk_ffts.iter() {
                     for (e2, fft2) in chunk_ffts.iter() {
                         chunk_ffts_squared.insert(
@@ -1175,7 +1174,7 @@ impl Theory for DarkPhoton {
                              // so its okay to use fft2.power and discard start/end and inherit
                              // start/end from fft1
                              (fft1.mul(&fft2.power.map(Complex::conj)))
-                                .mul_scalar(2.0 / (/* original had 60* */ (stationarity_chunk[1] - stationarity_chunk[0] - nancount) as f32))
+                                .mul_scalar(1.0 / ((stationarity_chunk[1] - stationarity_chunk[0]) as f32))
                         );
                     }
                 }
