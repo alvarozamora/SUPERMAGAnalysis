@@ -1460,7 +1460,7 @@ impl Theory for DarkPhoton {
         // Get number of seconds in the continguous subset of dataset
         let num_secs = projections_complete.num_secs();
         
-        let sz2_coherence: DashMap<_, _> = set
+        let sz_coherence: DashMap<_, _> = set
             .into_iter()
             .map(|(coherence_time, frequency_bin)| {
 
@@ -1492,7 +1492,7 @@ impl Theory for DarkPhoton {
                         (*window, triplet.block_cholesky().block_inv())
                         }).collect::<DashMap<_,_>>();
 
-                let sz2_map = DashMap::new();
+                let sz_map = DashMap::new();
                 for chunk in 0..num_chunks {
 
                     // // Get data vector for this chunk,
@@ -1557,24 +1557,24 @@ impl Theory for DarkPhoton {
 
                     // Step 5: Calculate svd of Nik
                     // Step 6: Calculate Zk = Udag_k * Y_k
-                    // This gets us s and z2
-                    let sz2 = nu
+                    // This gets us s and z
+                    let sz = nu
                         .into_par_iter()
                         .map(|(window, nu_window)| {
                             // Step 5: Carry out svd
                             // nu is a 15x3 matrix
                             // u should be 15x3, S should be 3x3, and v should be 3x3.
-                            let (Some(u), s, Some(v)) = nu_window.svd(true, true).expect("svd failed") else {
+                            let (Some(u), s, None) = nu_window.svd(true, false).expect("svd failed") else {
                                 panic!("u and v are being requested but were not given ")
                             };
                             assert_eq!(u.shape(), &[15, 3], "svd: u does not have correct shape");
                             assert_eq!(s.shape(), &[3], "svd: s does not have correct shape");
-                            assert_eq!(v.shape(), &[3, 3], "svd: v does not have correct shape");
+                            // assert_eq!(v.shape(), &[3, 3], "svd: v does not have correct shape");
 
                             // Conjugate and transpose v and u
-                            let vdag = v.t().map(|c| c.conj());
+                            // let vdag = v.t().map(|c| c.conj());
                             let udag = u.t().map(|c| c.conj());
-                            assert_eq!(vdag.shape(), &[3, 3], "congj t: vdag does not have correct shape");
+                            // assert_eq!(vdag.shape(), &[3, 3], "congj t: vdag does not have correct shape");
                             assert_eq!(udag.shape(), &[3, 15], "congj t: udag does not have correct shape");
                             
                             // Step 6: Zk = Udag_k * Y_k
@@ -1587,16 +1587,16 @@ impl Theory for DarkPhoton {
                         }).collect::<DashMap<_, _>>();
 
                     // Insert into sz map
-                    sz2_map.insert(chunk, sz2.into_read_only());
+                    sz_map.insert(chunk, sz.into_read_only());
                 }
                 // Return sz map
-                (coherence_time, (frequency_bin, sz2_map.into_read_only()))
+                (coherence_time, (frequency_bin, sz_map.into_read_only()))
             }).collect();
 
-        let sz2_coherence = sz2_coherence.into_read_only();
+        let sz_coherence = sz_coherence.into_read_only();
 
         // Use SZ to calculate bounds
-        let freqs_and_bounds: Vec<(f32, f32)> = sz2_coherence
+        let freqs_and_bounds: Vec<(f32, f32)> = sz_coherence
             .into_par_iter()
             .map(|(coherence_time, (frequency_bin, sz_chunk_map))| {
 
