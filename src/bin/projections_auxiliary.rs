@@ -1,8 +1,7 @@
-use supermag_analysis::constants::{DATA_DAYS, NUM_LEAP_YEARS};
+use supermag_analysis::constants::DATA_DAYS;
 use supermag_analysis::theory::dark_photon::DarkPhoton;
 use supermag_analysis::utils::async_balancer::Balancer;
-use supermag_analysis::utils::loader::day_since_first;
-use supermag_analysis::weights::{Analysis, Coherence, Stationarity};
+use supermag_analysis::weights::{Analysis, Stationarity};
 
 fn main() {
     env_logger::builder().filter_level(log::LevelFilter::Debug);
