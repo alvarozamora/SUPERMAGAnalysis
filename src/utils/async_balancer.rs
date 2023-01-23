@@ -82,12 +82,12 @@ impl<T> Balancer<T> {
 
 impl<T> Manager<T> {
     /// Calculates local set of items on which to work on.
-    pub fn local_set<I: Clone>(&mut self, items: &Vec<I>) -> Vec<I> {
+    pub fn local_set<I: Clone>(&mut self, items: &Vec<I>) -> Option<Vec<I>> {
         // Gather and return local set of items
         let mut local_sets = items.chunks(div_ceil(items.len(), self.size));
 
         // Return nth local set
-        local_sets.nth(self.rank).unwrap().to_vec()
+        Some(local_sets.nth(self.rank)?.to_vec())
     }
 
     /// Adds a handle

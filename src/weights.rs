@@ -139,10 +139,10 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
         // Calculate local set of tasks
         let set: Range<usize> = 0..loader.semivalid_chunks.len();
-        let local_set: Vec<usize> = balancer.local_set(&set.collect());
+        let mut local_set: Option<Vec<usize>> = balancer.local_set(&set.collect());
 
         // This loop calculates weights
-        for entry in local_set {
+        while let Some(Some(entry)) = local_set.as_mut().map(Vec::pop) {
 
             // Clone all relevant Arcs
             let local_weights: Arc<_> = weights.clone();
@@ -635,7 +635,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 .cloned()
                 .zip(frequency_bins)
                 .collect()
-            );
+            ).unwrap();
         // TODO: remove and do all coherence_times
         let local_set = vec![local_set.pop().unwrap()];
 
