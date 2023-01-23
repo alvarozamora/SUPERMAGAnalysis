@@ -37,14 +37,15 @@ impl<T> Balancer<T> {
         let max_available_threads = std::thread::available_parallelism()
             .expect("failed to retrieve number of threads on this system")
             .get();
-        let workers: usize = if parallel_async_tasks > max_available_threads {
-            println!("parallel_async_tasks provided ({parallel_async_tasks}) exceeds max_available_threads {max_available_threads}");
-            println!("defaulting to max_available_threads");
+        let workers: usize = parallel_async_tasks;
+        // if parallel_async_tasks > max_available_threads {
+        //     println!("parallel_async_tasks provided ({parallel_async_tasks}) exceeds max_available_threads {max_available_threads}");
+        //     println!("defaulting to max_available_threads");
 
-            max_available_threads
-        } else {
-            parallel_async_tasks
-        };
+        //     max_available_threads
+        // } else {
+        //     parallel_async_tasks
+        // };
 
         // Initialize tokio runtime
         let runtime = tokio::runtime::Builder::new_multi_thread()
