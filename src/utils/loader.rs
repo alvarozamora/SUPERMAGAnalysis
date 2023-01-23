@@ -349,14 +349,13 @@ impl DatasetLoader {
                             .get(2)
                             .unwrap()
                             .to_string();
-                        let declinations = &self.declinations_interpolator;
-                        tokio::spawn(_load_chunk(
+                        _load_chunk(
                             index,
                             chunk.clone(),
                             *self.coordinate_map.get(&station_name).unwrap(),
-                        ))
+                            &station_name,
+                        )
                         .await
-                        .unwrap()
                     })
                     .collect::<Vec<_>>();
 
@@ -383,7 +382,12 @@ impl DatasetLoader {
     }
 }
 
-async fn _load_chunk(index: Index, chunk: Chunk, coordinates: Coordinates) -> Dataset {
+async fn _load_chunk(
+    index: Index,
+    chunk: Chunk,
+    coordinates: Coordinates,
+    station: &str,
+) -> Dataset {
     // Construct a collection of futures for the daily datasets in this chunk for this station
     let dataset_futures = chunk
         .files
@@ -415,7 +419,7 @@ async fn _load_chunk(index: Index, chunk: Chunk, coordinates: Coordinates) -> Da
     // new values will be used to rotate the second field.
     //
     // First get interpolator
-    let interpolator = IGRF_DATA_INTERPOLATOR.interpolator(&chunk.station);
+    let interpolator = IGRF_DATA_INTERPOLATOR.interpolator(station);
     (field_1, field_2) = match field_1
         .into_iter()
         .zip(field_2.into_iter())

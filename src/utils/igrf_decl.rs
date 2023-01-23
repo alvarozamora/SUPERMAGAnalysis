@@ -97,7 +97,7 @@ impl Declinations {
                 let (secs, declinations) = secs
                     .into_iter()
                     .zip(declinations.into_iter())
-                    .sorted_unstable_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+                    .sorted_unstable_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
                     .unzip();
                 // Construct key-value pair with interp1d
                 (
@@ -113,8 +113,10 @@ impl Declinations {
     }
 
     // Return a reference to the station interpolator
-    pub fn interpolator(&self, station: &String) -> &Interp1d<f64, f64> {
-        self.inner.get(station).expect("station should exist")
+    pub fn interpolator(&self, station: &str) -> &Interp1d<f64, f64> {
+        self.inner
+            .get(station)
+            .expect(&format!("station {station} should exist"))
     }
 
     pub fn interpolate(&self, station: String, sec: usize) -> Declination {
@@ -122,7 +124,9 @@ impl Declinations {
         let interpolator = self.interpolator(&station);
 
         // Intepolate
-        interpolator.interpolate_checked(sec as f64).expect("out of bounds")
+        interpolator
+            .interpolate_checked(sec as f64)
+            .expect("out of bounds")
     }
 }
 
@@ -184,6 +188,7 @@ fn test_convert_entry_year_to_sec_float() {
 
 #[test]
 fn test_declination_interpolation() {
+    use approx_eq::assert_approx_eq;
     /*
      * IGRF_declinations_for_1sec.txt
      *
@@ -200,20 +205,23 @@ fn test_declination_interpolation() {
     let sec_mid = (sec_1998 + sec_1999) / 2;
 
     // Check left
-    assert_eq!(
+    assert_approx_eq!(
         IGRF_DATA_INTERPOLATOR.interpolate(String::from("SON"), sec_1998),
-        0.34
+        0.34 * PI / 180.0,
+        1e-6
     );
 
     // Check right
-    assert_eq!(
+    assert_approx_eq!(
         IGRF_DATA_INTERPOLATOR.interpolate(String::from("SON"), sec_1999),
-        0.36
+        0.36 * PI / 180.0,
+        1e-6
     );
 
     // Check mid (actually interpolating now)
-    assert_eq!(
+    assert_approx_eq!(
         IGRF_DATA_INTERPOLATOR.interpolate(String::from("SON"), sec_mid),
-        0.35 // (0.34 + 0.36) / 2.0
+        0.35 * PI / 180.0, // (0.34 + 0.36) / 2.0
+        1e-6
     );
 }
