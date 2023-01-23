@@ -188,9 +188,6 @@ impl DailyDatasetLoader {
         // Find all stations for which there is data for this day
         let station_files = retrieve_stations_daily(day);
 
-        // Initialize declination interpolator
-        let declinations_interpolator = Declinations::load();
-
         DailyDatasetLoader {
             coordinate_map,
             station_files,
@@ -203,9 +200,6 @@ impl DailyDatasetLoader {
     pub fn change_to_day(self, day: usize) -> Result<Self> {
         // Find all stations for which there is data for this year
         let station_files = retrieve_stations_daily(day);
-
-        // Initialize declination interpolator
-        let declinations_interpolator = Declinations::load();
 
         if station_files.len() > 0 {
             Ok(DailyDatasetLoader {
@@ -302,7 +296,6 @@ pub struct DatasetLoader {
     pub semivalid_chunks: Arc<DashMap<Index, Vec<Chunk>>>,
     days: Range<usize>,
     stationarity: Stationarity,
-    declinations_interpolator: Declinations,
     // chunk: usize,
 }
 
@@ -315,15 +308,11 @@ impl DatasetLoader {
         // Find all stations for which there is data for this year
         let semivalid_chunks = retrieve_chunks(days.clone(), stationarity);
 
-        // Initialize declination interpolator
-        let declinations_interpolator = Declinations::load();
-
         Self {
             coordinate_map,
             semivalid_chunks,
             days: days.unwrap_or(DATA_DAYS),
             stationarity,
-            declinations_interpolator,
         }
     }
 
