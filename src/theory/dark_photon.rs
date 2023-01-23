@@ -1070,7 +1070,6 @@ impl Theory for DarkPhoton {
 
         // NOTE: This is hardcoded for stationarity = 1 year
         (2003..2021).into_par_iter().for_each(|year| {
-        // (2007..=2007).into_par_iter().for_each(|year| {
 
             // Get stationarity period indices (place within entire SUPERMAG dataset)
             // NOTE: this definition varies from original implementation. The original
@@ -1404,12 +1403,7 @@ impl Theory for DarkPhoton {
                                                             low: low_array,
                                                             mid: mid_array,
                                                             high: high_array,
-                                                            // lowf: lowf,
                                                             midf: midf,
-                                                            // hif: hif,
-                                                            // coh_time: *coherence_time,
-                                                            // chunk: chunk,
-                                                            // window: Some(window_index),
                                                         }
                                                     });
                                             });
@@ -1645,7 +1639,6 @@ impl Theory for DarkPhoton {
                     bounds.push((frequency as f32, bound(&sz_references)));
                 }
 
-                // TODO
                 bounds
             }).flatten().collect();
 
@@ -1720,13 +1713,13 @@ fn bound(
     //        = pdf(exp(logeps)) * exp(logeps) 
     // i.e. for 
     // x = eps
-    // y = logeps
+    // y = log(eps)
     // x(y) = exp(y)  ---> eps(logeps) = exp(logeps)
     // dx(y)/dy = d/dy exp(y) = exp(y) ---> exp(logeps)
     //
     // The integration library used below expects double precision...
     let transformed_unnormalized_pdf = |logeps: f64| {
-        logpdf(1.0, logeps.exp() as f32) as f64 * logeps.exp()
+        (logpdf(1.0, logeps.exp() as f32) as f64) * logeps.exp()
     };
 
     // Now, integrate function from -20 to 20, letting integrator figure it out
@@ -2104,14 +2097,10 @@ impl Triplet {
             low: self.low.inv().expect("failed matrix inversion"),
             mid: self.mid.inv().expect("failed matrix inversion"),
             high: self.high.inv().expect("failed matrix inversion"),
-            // lowf: self.lowf,
             midf: self.midf,
-            // hif: self.hif,
-            // coh_time: self.coh_time,
-            // chunk: self.chunk,
-            // window: self.window,
         }
     }
+
     /// Performs lower cholesky decomposition on every block in the triplet,
     /// panicking if it failed.
     /// NOTE: The cholesky decomposition of a block diagonal matrix is equal to a 
@@ -2122,12 +2111,8 @@ impl Triplet {
             low: self.low.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
             mid: self.mid.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
             high: self.high.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
-            // lowf: self.lowf,
             midf: self.midf,
-            // hif: self.hif,
-            // coh_time: self.coh_time,
-            // chunk: self.chunk,
-            // window: self.window,
+        
         }
     }
 
@@ -2378,7 +2363,7 @@ impl FromChunkMap for DarkPhotonAuxiliary {
                     .assign(&auxiliary.h[i]);
             }
         }
-        
+
         DarkPhotonAuxiliary { h: auxiliary_values }
     }
 }
