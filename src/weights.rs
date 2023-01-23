@@ -118,18 +118,6 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
         println!("Running Analysis");
 
-        // Number of days per chunk
-        // TODO: fix
-        let days_per_chunk: usize = match stationarity {
-            Stationarity::Yearly => 365, // TODO,
-            Stationarity::Daily(_) => 365,
-        };
-
-        // let days_per_chunk = match stationarity {
-        //     Coherence::Days(num_days_per_chunk) => num_days_per_chunk,
-        //     Coherence::Yearly => todo!(),
-        // };
-
         // Grab dataset loader for the chunks
         let loader = Arc::new(DatasetLoader::new(days.clone(), stationarity));
 
@@ -173,6 +161,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
                     // Load datasets for this chunk
                     let datasets: DashMap<StationName, Dataset> = local_loader.load_chunk(index).await.unwrap();
+                    let dataset_length = datasets.iter().next().unwrap().field_1.len();
 
                     // e.g. on a year boundary where all stations change
                     if datasets.len() == 0 {
@@ -183,8 +172,8 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     // Local hashmaps and time series
                     let local_hashmap_n: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
                     let local_hashmap_e: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
-                    let mut local_wn: TimeSeries = Array1::from_vec(vec![0.0_f32; days_per_chunk * SECONDS_PER_DAY]);
-                    let mut local_we: TimeSeries = Array1::from_vec(vec![0.0_f32; days_per_chunk * SECONDS_PER_DAY]);
+                    let mut local_wn: TimeSeries = Array1::from_vec(vec![0.0_f32; dataset_length * SECONDS_PER_DAY]);
+                    let mut local_we: TimeSeries = Array1::from_vec(vec![0.0_f32; dataset_length * SECONDS_PER_DAY]);
                     
                     // Calculate weights based on datasets for this chunk (stationarity period)
                     calculate_weights_for_chunk(
