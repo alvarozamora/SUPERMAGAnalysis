@@ -1065,7 +1065,6 @@ impl Theory for DarkPhoton {
 
         // NOTE: This is hardcoded for stationarity = 1 year
         (2003..2021).into_par_iter().for_each(|year| {
-        // (2007..=2007).into_par_iter().for_each(|year| {
 
             // Get stationarity period indices (place within entire SUPERMAG dataset)
             // NOTE: this definition varies from original implementation. The original
@@ -1161,7 +1160,6 @@ impl Theory for DarkPhoton {
 
                 // Initialize dashmap for correlation
                 let chunk_ffts_squared: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DashMap::new();
-                let nancount = 0;
                 for (e1, fft1) in chunk_ffts.iter() {
                     for (e2, fft2) in chunk_ffts.iter() {
                         chunk_ffts_squared.insert(
@@ -1170,7 +1168,7 @@ impl Theory for DarkPhoton {
                              // so its okay to use fft2.power and discard start/end and inherit
                              // start/end from fft1
                              (fft1.mul(&fft2.power.map(Complex::conj)))
-                                .mul_scalar(2.0 / (/* original had 60* */ (stationarity_chunk[1] - stationarity_chunk[0] - nancount) as f32))
+                                .mul_scalar(1.0 / ((stationarity_chunk[1] - stationarity_chunk[0]) as f32))
                         );
                     }
                 }
@@ -1256,6 +1254,7 @@ impl Theory for DarkPhoton {
                 let len_data = secs.len();
 
                 // Then, get each of the coherence chunks
+                // TODO: last chunk
                 let num_chunks = len_data / coherence_time;
                 
                 
@@ -1398,12 +1397,7 @@ impl Theory for DarkPhoton {
                                                             low: low_array,
                                                             mid: mid_array,
                                                             high: high_array,
-                                                            // lowf: lowf,
                                                             midf: midf,
-                                                            // hif: hif,
-                                                            // coh_time: *coherence_time,
-                                                            // chunk: chunk,
-                                                            // window: Some(window_index),
                                                         }
                                                     });
                                             });
@@ -1460,11 +1454,12 @@ impl Theory for DarkPhoton {
         // Get number of seconds in the continguous subset of dataset
         let num_secs = projections_complete.num_secs();
         
-        let sz2_coherence: DashMap<_, _> = set
+        let sz_coherence: DashMap<_, _> = set
             .into_iter()
             .map(|(coherence_time, frequency_bin)| {
 
                 // Get number of chunks for this coherence time
+                // TODO: last chunk
                 let num_chunks = num_secs / coherence_time;
 
                 // Get theory mean for this coherence time
@@ -1491,7 +1486,7 @@ impl Theory for DarkPhoton {
                         (*window, triplet.block_cholesky().block_inv())
                         }).collect::<DashMap<_,_>>();
 
-                let sz2_map = DashMap::new();
+                let sz_map = DashMap::new();
                 for chunk in 0..num_chunks {
 
                     // // Get data vector for this chunk,
@@ -1556,25 +1551,25 @@ impl Theory for DarkPhoton {
 
                     // Step 5: Calculate svd of Nik
                     // Step 6: Calculate Zk = Udag_k * Y_k
-                    // This gets us s and z2
-                    let sz2 = nu
+                    // This gets us s and z
+                    let sz = nu
                         .into_par_iter()
                         .map(|(window, nu_window)| {
                             // Step 5: Carry out svd
                             // nu is a 15x3 matrix
                             // u should be 15x3, S should be 3x3, and v should be 3x3.
-                            let (Some(u), s, Some(v)) = nu_window.svd(true, true).expect("svd failed") else {
+                            let (Some(u), s, None) = nu_window.svd(true, false).expect("svd failed") else {
                                 panic!("u and v are being requested but were not given ")
                             };
                             assert_eq!(u.shape(), &[15, 3], "svd: u does not have correct shape");
                             assert_eq!(s.shape(), &[3], "svd: s does not have correct shape");
-                            assert_eq!(v.shape(), &[3, 3], "svd: v does not have correct shape");
+                            // assert_eq!(v.shape(), &[3, 3], "svd: v does not have correct shape");
                             // TODO: Save to disk
 
                             // Conjugate and transpose v and u
-                            let vdag = v.t().map(|c| c.conj());
+                            // let vdag = v.t().map(|c| c.conj());
                             let udag = u.t().map(|c| c.conj());
-                            assert_eq!(vdag.shape(), &[3, 3], "congj t: vdag does not have correct shape");
+                            // assert_eq!(vdag.shape(), &[3, 3], "congj t: vdag does not have correct shape");
                             assert_eq!(udag.shape(), &[3, 15], "congj t: udag does not have correct shape");
                             
                             // Step 6: Zk = Udag_k * Y_k
@@ -1588,20 +1583,21 @@ impl Theory for DarkPhoton {
                         }).collect::<DashMap<_, _>>();
 
                     // Insert into sz map
-                    sz2_map.insert(chunk, sz2.into_read_only());
+                    sz_map.insert(chunk, sz.into_read_only());
                 }
                 // Return sz map
-                (coherence_time, (frequency_bin, sz2_map.into_read_only()))
+                (coherence_time, (frequency_bin, sz_map.into_read_only()))
             }).collect();
 
-        let sz2_coherence = sz2_coherence.into_read_only();
+        let sz_coherence = sz_coherence.into_read_only();
 
         // Use SZ to calculate bounds
-        let freqs_and_bounds: Vec<(f32, f32)> = sz2_coherence
+        let freqs_and_bounds: Vec<(f32, f32)> = sz_coherence
             .into_par_iter()
             .map(|(coherence_time, (frequency_bin, sz_chunk_map))| {
 
                 // Total number of chunks for this coherence time
+                // TODO: last chunk
                 let num_chunks = num_secs / coherence_time;
 
                 // let bounds = vec![];
@@ -1673,7 +1669,7 @@ fn bound(
         // Term 3: log sum(a)
         let term_3: f32 = sz.iter().map(|(si, _zi)| {
             si.iter().map(|sik| {
-                ((3.0 + eps.powi(2) * sik.powi(2)).powi(2)).ln()
+                - ((3.0 + eps.powi(2) * sik.powi(2)).powi(2)).ln()
             }).sum::<f32>()
         }).sum();
 
@@ -1684,7 +1680,7 @@ fn bound(
             for j in 0..sz.len() {
                 let (sj, zj) = sz[j];
                 for i in 0..3 {
-                    acc += 3.0 * zj[i].norm_sqr() / (3.0 + eps.powi(2) * sj[i].powi(2));
+                    acc -= 3.0 * zj[i].norm_sqr() / (3.0 + eps.powi(2) * sj[i].powi(2));
                 }
             }
             acc
@@ -1713,13 +1709,13 @@ fn bound(
     //        = pdf(exp(logeps)) * exp(logeps) 
     // i.e. for 
     // x = eps
-    // y = logeps
+    // y = log(eps)
     // x(y) = exp(y)  ---> eps(logeps) = exp(logeps)
     // dx(y)/dy = d/dy exp(y) = exp(y) ---> exp(logeps)
     //
     // The integration library used below expects double precision...
     let transformed_unnormalized_pdf = |logeps: f64| {
-        logpdf(1.0, logeps.exp() as f32) as f64 * logeps.exp()
+        (logpdf(1.0, logeps.exp() as f32) as f64) * logeps.exp()
     };
 
     // Now, integrate function from -20 to 20, letting integrator figure it out
@@ -2097,14 +2093,10 @@ impl Triplet {
             low: self.low.inv().expect("failed matrix inversion"),
             mid: self.mid.inv().expect("failed matrix inversion"),
             high: self.high.inv().expect("failed matrix inversion"),
-            // lowf: self.lowf,
             midf: self.midf,
-            // hif: self.hif,
-            // coh_time: self.coh_time,
-            // chunk: self.chunk,
-            // window: self.window,
         }
     }
+
     /// Performs lower cholesky decomposition on every block in the triplet,
     /// panicking if it failed.
     /// NOTE: The cholesky decomposition of a block diagonal matrix is equal to a 
@@ -2115,12 +2107,8 @@ impl Triplet {
             low: self.low.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
             mid: self.mid.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
             high: self.high.cholesky(UPLO::Lower).expect("failed cholesky decomposition"),
-            // lowf: self.lowf,
             midf: self.midf,
-            // hif: self.hif,
-            // coh_time: self.coh_time,
-            // chunk: self.chunk,
-            // window: self.window,
+        
         }
     }
 
@@ -2371,7 +2359,7 @@ impl FromChunkMap for DarkPhotonAuxiliary {
                     .assign(&auxiliary.h[i]);
             }
         }
-        
+
         DarkPhotonAuxiliary { h: auxiliary_values }
     }
 }
