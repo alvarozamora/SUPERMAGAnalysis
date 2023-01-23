@@ -17,7 +17,8 @@ ndarray = { version = "0.15.6", features = ["rayon", "serde"] }
 ndarray-npy = "0.8.1"
 anyhow = "1.0.57"
 glob = "0.3.0"
-mpi = { version = "0.6.0", path = "../rsmpi/" }
+#mpi = { version = "0.6.0", path = "../rsmpi/" }
+mpi = { version = "0.6.0", path = "../../rustMPItest/" }
 dashmap = { version = "5.4.0", features = ["serde", "rayon"] }
 tokio = { version = "1.19.2", features = ["full"] }
 futures = "0.3.21"
@@ -45,3 +46,4 @@ rocksdb = "0.19.0"
 interp = "0.1.1"
 quadrature = "0.1.2"
 sysinfo = "0.26.7"
+approx_eq = "0.1.8"
