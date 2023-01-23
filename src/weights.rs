@@ -395,8 +395,6 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 get_largest_contiguous_subset(&set)
             };
             println!("rank {}: longest contiguous subset of chunks begins at {starting_value} and has length {size} chunks", balancer.rank);
-            // TODO: cleanup: this was back when starting_value was a day-based chunk
-            // println!("rank {}: this starts {:?} and ends {:?}", balancer.rank, sec_to_year(starting_value * 24 * 60 * 60), sec_to_year((starting_value + size) * 24 * 60 * 60));
             println!("rank {}: this starts on year {:?} and ends on year {:?}", balancer.rank, starting_value, starting_value + size);
 
             // TODO: generalize to sec
@@ -641,7 +639,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         let frequency_bins: Vec<FrequencyBin> = frequencies_from_coherence_times(&coherence_times);
 
         // Partition zipped(coherence_times, frequency_bins) over ranks
-        let local_set: Vec<(usize, FrequencyBin)> = balancer
+        let mut local_set: Vec<(usize, FrequencyBin)> = balancer
             .local_set(
                 &coherence_times
                 .iter()
@@ -649,29 +647,23 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 .zip(frequency_bins)
                 .collect()
             );
-        log::debug!("local_set consists of {} elements", local_set.len());
+        // TODO: remove and do all coherence_times
+        let local_set = vec![local_set.pop().unwrap()];
 
-        // let set =  coherence_times
-        //     .iter()
-        //     .cloned()
-        //     .zip(frequency_bins)
-        //     .collect();
+        log::debug!("local_set consists of {} elements", local_set.len());
 
         // // Calculate data vector for this local set.
         let data_vector_dashmap = theory
-            // .calculate_data_vector(&projections_complete, &local_set);
             .calculate_data_vector(&projections_complete_struct, &local_set);
         log::debug!("finished data vector");
         
         // // Calculate the theory mean
         let theory_mean = theory
-            // .calculate_mean_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
             .calculate_mean_theory(&local_set, total_secs, coherence_times.len(), Arc::clone(&auxiliary_complete));
         log::debug!("finished mean");
 
         // Calculate the theory var
         let theory_var = theory
-            // .calculate_var_theory(&local_set, total_secs, coherence_times.len(), auxiliary_complete);
             .calculate_var_theory(&local_set, &projections_complete_struct, coherence_times.len(), days.clone(), stationarity, auxiliary_complete);
         log::debug!("finished var");
         drop(theory_var);
@@ -682,7 +674,6 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         log::debug!("finished bounds");
         
 
-        // println!("{} {} {} elements", data_vector_dashmap.len(), theory_mean.len(), theory_var.len());
         for (freq, bound) in bounds {
             println!("{freq} {bound}");
         }
@@ -972,16 +963,16 @@ pub(crate) fn in_longest_subset(chunk: usize, size: usize, starting_value: usize
 }
 
 
-fn next_power_of_two(number: usize) -> usize {
+// fn next_power_of_two(number: usize) -> usize {
 
-    // Initialize result with 2
-    let mut next_power = 2;
+//     // Initialize result with 2
+//     let mut next_power = 2;
 
-    // Find next power of two iteratively 
-    while next_power < number {
-        next_power *= 2;
-    }
+//     // Find next power of two iteratively 
+//     while next_power < number {
+//         next_power *= 2;
+//     }
 
-    // Return next power of two
-    next_power
-}
+//     // Return next power of two
+//     next_power
+// }
