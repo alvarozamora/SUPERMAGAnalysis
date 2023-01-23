@@ -500,8 +500,6 @@ impl Theory for DarkPhoton {
                     // exp(ix) = cos(x) + i sin(x)
                     //
                     // Note: when you encounter a chunk that has total time < coherence time, the s![start..end] below will truncate it.
-                    // TODO: check phase
-                    // TODO: check f32 precision
                     // TODO: shorthand Complex with const I
                     // let cis_fh_f = Array1::range(0.0, *coherence_time as f32, 1.0)
                     let cis_fh_f = (start..end)
@@ -989,14 +987,11 @@ impl Theory for DarkPhoton {
                     
                     // muz 2, 3, 4 are all at f = -fdhat
                     let fdhat = (approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed");
-                    // TODO: check phase
-                    // let cis_mfh = Array1::range(0.0, *coherence_time as f32, 1.0)
                     let cis_mfh = (start..end)
                         .map(|x| Complex { re: x as f32, im: 0.0 })
                         .collect::<Array1<Complex<f32>>>()
                         .mul(Complex::new(0.0, 2.0 * SINGLE_PI * -fdhat))
                         .mapv(Complex::exp);
-                    // let cis_fh = Array1::range(0.0, *coherence_time as f32, 1.0)
                     let cis_fh = (start..end)
                         .map(|x| Complex { re: x as f32, im: 0.0 })
                         .collect::<Array1<Complex<f32>>>()
@@ -1379,7 +1374,6 @@ impl Theory for DarkPhoton {
                                                         triplet.high[[ix, iy]] += high;
                                                     }).or_insert_with(|| {
 
-                                                        // TODO: remove after debugging
                                                         triplet_counter.fetch_add(1, Ordering::Relaxed);
 
                                                         // Calculate the triplet of arrays with the first entry
@@ -1575,6 +1569,7 @@ impl Theory for DarkPhoton {
                             assert_eq!(u.shape(), &[15, 3], "svd: u does not have correct shape");
                             assert_eq!(s.shape(), &[3], "svd: s does not have correct shape");
                             assert_eq!(v.shape(), &[3, 3], "svd: v does not have correct shape");
+                            // TODO: Save to disk
 
                             // Conjugate and transpose v and u
                             let vdag = v.t().map(|c| c.conj());
@@ -1586,6 +1581,7 @@ impl Theory for DarkPhoton {
                             let y_k = y.get(&window).expect("yk should exist for this window").to_vec();
                             assert_eq!(y_k.shape(), &[15]);
                             let z = udag.dot(&y_k);
+                            // TODO: Save z to disk
                             assert_eq!(z.shape(), &[3]);
 
                             (window, (s, z))
@@ -1643,7 +1639,6 @@ impl Theory for DarkPhoton {
                     bounds.push((frequency as f32, bound(&sz_references)));
                 }
 
-                // TODO
                 bounds
             }).flatten().collect();
 
