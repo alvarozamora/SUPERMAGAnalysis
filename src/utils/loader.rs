@@ -426,7 +426,9 @@ async fn _load_chunk(
         .enumerate()
         .map(|(sec, (f1, f2))| {
             // Interpolate declination to this second
-            let sec_declination = interpolator.interpolate_checked(sec as f64).unwrap();
+            let sec_declination = interpolator
+                .interpolate_checked((chunk.start_sec + sec) as f64)
+                .unwrap();
             // Apply rotations
             (
                 apply_rotation_f1(f1, f2, sec_declination as f32),
