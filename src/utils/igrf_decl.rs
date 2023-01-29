@@ -131,32 +131,36 @@ impl Declinations {
 }
 
 /// The values given are for the start of the 180th day of each year.
-fn convert_entry_year_to_sec_float(year: usize) -> SecFloat {
+const fn convert_entry_year_to_sec_float(year: usize) -> SecFloat {
+    convert_entry_year_to_sec(year) as SecFloat
+}
+
+/// The values given are for the start of the 180th day of each year.
+#[inline(always)]
+const fn convert_entry_year_to_sec(year: usize) -> usize {
     // Index day by day since first day of data
     let day: usize = day_since_first(179 /* days start at 0 */, year);
 
     // Here we assume we refer to the first second of the 180th day
     let sec: usize = day * SECONDS_PER_DAY + 1;
 
-    sec as SecFloat
+    sec
 }
+
+#[inline(always)]
+pub(crate) fn apply_rotation(f1: f32, f2: f32, theta: f32) -> (f32, f32) {
+    let (sin, cos) = theta.sin_cos();
+    (f1 * cos - f2 * sin, f1 * sin + f2 * cos)
+}
+// #[inline(always)]
+// pub(crate) fn apply_rotation_f1(f1: f32, f2: f32, theta: f32) -> f32 {
+//     f1 * (theta).cos() - f2 * (theta).sin()
+// }
 
 // #[inline(always)]
-// fn apply_rotation(f1: f32, f2: f32, theta: f32) -> (f32, f32) {
-//     (
-//         f1 * (theta).cos() - f2 * (theta).sin(),
-//         f1 * (theta).sin() + f2 * (theta).cos(),
-//     )
+// pub(crate) fn apply_rotation_f2(f1: f32, f2: f32, theta: f32) -> f32 {
+//     f1 * (theta).sin() + f2 * (theta).cos()
 // }
-#[inline(always)]
-pub(crate) fn apply_rotation_f1(f1: f32, f2: f32, theta: f32) -> f32 {
-    f1 * (theta).cos() - f2 * (theta).sin()
-}
-
-#[inline(always)]
-pub(crate) fn apply_rotation_f2(f1: f32, f2: f32, theta: f32) -> f32 {
-    f1 * (theta).sin() + f2 * (theta).cos()
-}
 
 #[test]
 fn test_convert_entry_year_to_sec_float() {
@@ -224,4 +228,37 @@ fn test_declination_interpolation() {
         0.35 * PI / 180.0, // (0.34 + 0.36) / 2.0
         1e-6
     );
+}
+
+const LOWER_BOUND: usize = 0;
+const LOWER_INNER_BOUND: usize = convert_entry_year_to_sec(1998);
+const UPPER_INNER_BOUND: usize = convert_entry_year_to_sec(2020);
+const UPPER_BOUND: usize = day_since_first(364, 2020) * SECONDS_PER_DAY + SECONDS_PER_DAY - 1;
+
+pub(crate) fn shift_point(sec: usize) -> Result<f64, OOB> {
+    // we get lower bound for free because of unsigned int but it's ok
+    if sec >= LOWER_BOUND && sec < LOWER_INNER_BOUND {
+        // handles [LB, LIB)
+        return Ok(LOWER_INNER_BOUND as f64);
+    } else if sec <= UPPER_BOUND && sec > UPPER_INNER_BOUND {
+        // handles (UIB, UB]
+        return Ok(UPPER_INNER_BOUND as f64);
+    } else if sec >= LOWER_INNER_BOUND && sec <= UPPER_INNER_BOUND {
+        // handles [LIB, UIB]
+        return Ok(sec as f64);
+    } else if sec > UPPER_BOUND {
+        // handles (UB, inf)
+        return Err(OOB {
+            point: sec as f64,
+            bound: UPPER_BOUND as f64,
+        });
+    } else {
+        unreachable!()
+    }
+}
+
+#[derive(Debug)]
+pub struct OOB {
+    pub point: f64,
+    pub bound: f64,
 }

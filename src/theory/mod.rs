@@ -15,7 +15,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use special::Gamma;
 use sphrs::{ComplexSHType, Coordinates as SphrsCoordinates, SHEval};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Debug;
 use std::ops::Range;
 use std::sync::Arc;
