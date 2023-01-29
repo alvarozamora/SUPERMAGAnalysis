@@ -1,25 +1,20 @@
-use super::igrf_decl::{
-    apply_rotation_f1, apply_rotation_f2, Declinations, IGRF_DATA_INTERPOLATOR,
-};
+use super::igrf_decl::{apply_rotation, shift_point, IGRF_DATA_INTERPOLATOR};
 use crate::constants::*;
-use crate::theory::NonzeroElement;
 use crate::utils::coordinates::*;
-use crate::weights::{Coherence, Stationarity};
+use crate::weights::Stationarity;
 use anyhow::Error;
 use anyhow::Result;
 use dashmap::DashMap;
-use futures::future::join_all;
+use futures::StreamExt;
 use glob::glob;
-use interp1d::Interp1d;
 use ndarray::Axis;
 use ndarray::{arr1, Array1};
+use once_cell::sync::Lazy;
 use rayon::iter::*;
-use rayon::prelude::*;
 use std::collections::HashMap;
 use std::convert::TryInto;
 use std::fs::File;
 use std::io::prelude::*;
-use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
@@ -54,6 +49,15 @@ pub struct Dataset {
     /// This is e.g the year, day, or chunk
     pub index: Index,
 }
+
+static STATIONS: Lazy<Vec<PathBuf>> =
+    Lazy::new(|| glob("../stations/*").unwrap().map(|x| x.unwrap()).collect());
+static STATION_DAYS: Lazy<Vec<PathBuf>> = Lazy::new(|| {
+    glob("../stations/*/*")
+        .unwrap()
+        .map(|x| x.unwrap())
+        .collect()
+});
 
 pub struct YearlyDatasetLoader {
     pub coordinate_map: Arc<HashMap<StationName, Coordinates>>,
@@ -173,111 +177,111 @@ impl YearlyDatasetLoader {
     }
 }
 
-pub struct DailyDatasetLoader {
-    pub coordinate_map: Arc<HashMap<StationName, Coordinates>>,
-    pub station_files: Vec<String>,
-    pub day: Index,
-}
+// struct DailyDatasetLoader {
+//     pub coordinate_map: Arc<HashMap<StationName, Coordinates>>,
+//     pub station_files: Vec<String>,
+//     pub day: Index,
+// }
 
-impl DailyDatasetLoader {
-    /// Construct a new `DatasetLoader` given a `year`.
-    pub fn new_from_day(day: usize) -> Self {
-        // Construct coordinate map
-        let coordinate_map = Arc::new(construct_coordinate_map());
+// impl DailyDatasetLoader {
+//     /// Construct a new `DatasetLoader` given a `year`.
+//     pub fn new_from_day(day: usize) -> Self {
+//         // Construct coordinate map
+//         let coordinate_map = Arc::new(construct_coordinate_map());
 
-        // Find all stations for which there is data for this day
-        let station_files = retrieve_stations_daily(day);
+//         // Find all stations for which there is data for this day
+//         let station_files = retrieve_stations_daily(day);
 
-        DailyDatasetLoader {
-            coordinate_map,
-            station_files,
-            day,
-        }
-    }
+//         DailyDatasetLoader {
+//             coordinate_map,
+//             station_files,
+//             day,
+//         }
+//     }
 
-    /// Changes the loader to a different day. (This skips construction of coordinate map,
-    /// which is rather cheap but I hate unnecessarily repeating calculations).
-    pub fn change_to_day(self, day: usize) -> Result<Self> {
-        // Find all stations for which there is data for this year
-        let station_files = retrieve_stations_daily(day);
+//     /// Changes the loader to a different day. (This skips construction of coordinate map,
+//     /// which is rather cheap but I hate unnecessarily repeating calculations).
+//     pub fn change_to_day(self, day: usize) -> Result<Self> {
+//         // Find all stations for which there is data for this year
+//         let station_files = retrieve_stations_daily(day);
 
-        if station_files.len() > 0 {
-            Ok(DailyDatasetLoader {
-                coordinate_map: self.coordinate_map,
-                station_files,
-                day,
-            })
-        } else {
-            Err(anyhow::Error::msg("No stations found for this year"))
-        }
-    }
+//         if station_files.len() > 0 {
+//             Ok(DailyDatasetLoader {
+//                 coordinate_map: self.coordinate_map,
+//                 station_files,
+//                 day,
+//             })
+//         } else {
+//             Err(anyhow::Error::msg("No stations found for this year"))
+//         }
+//     }
 
-    /// Loads the `Dataset` specified by the next file in the `station_files` vector.
-    pub async fn load_next(&mut self) -> Option<Dataset> {
-        // Return None if empty. Get next file if not.
-        if self.len() == 0 {
-            return None;
-        };
-        let station_file = self.station_files.pop().unwrap();
+//     /// Loads the `Dataset` specified by the next file in the `station_files` vector.
+//     pub async fn load_next(&mut self) -> Option<Dataset> {
+//         // Return None if empty. Get next file if not.
+//         if self.len() == 0 {
+//             return None;
+//         };
+//         let station_file = self.station_files.pop().unwrap();
 
-        // Calculate expected size of each f32 fields, in bytes
-        let expected_size = 24 * 60 * 60 * 4;
+//         // Calculate expected size of each f32 fields, in bytes
+//         let expected_size = 24 * 60 * 60 * 4;
 
-        // Open station data for this year
-        let mut file = tokio::fs::File::open(&station_file)
-            .await
-            .expect("couldn't open station file");
+//         // Open station data for this year
+//         let mut file = tokio::fs::File::open(&station_file)
+//             .await
+//             .expect("couldn't open station file");
 
-        // Load file contents into buffer
-        let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer)
-            .await
-            .expect("failed to load file contents into buffer");
+//         // Load file contents into buffer
+//         let mut buffer = Vec::new();
+//         file.read_to_end(&mut buffer)
+//             .await
+//             .expect("failed to load file contents into buffer");
 
-        // Ensure buffer size matches expectations
-        assert_eq!(
-            buffer.len(),
-            3 * expected_size,
-            "buffer size is not correct"
-        );
+//         // Ensure buffer size matches expectations
+//         assert_eq!(
+//             buffer.len(),
+//             3 * expected_size,
+//             "buffer size is not correct"
+//         );
 
-        // Break up buffer into expected_size chunks
-        let [field_1, field_2, field_3]: [Array1<f32>; 3] = {
-            buffer
-                .chunks_exact_mut(expected_size)
-                .map(|x| arr1(&x.to_f32()))
-                .collect::<Vec<TimeSeries>>()
-                .try_into()
-                .unwrap()
-        };
+//         // Break up buffer into expected_size chunks
+//         let [field_1, field_2, field_3]: [Array1<f32>; 3] = {
+//             buffer
+//                 .chunks_exact_mut(expected_size)
+//                 .map(|x| arr1(&x.to_f32()))
+//                 .collect::<Vec<TimeSeries>>()
+//                 .try_into()
+//                 .unwrap()
+//         };
 
-        // Find station name, which is HashMap key for Coordinates
-        let station_name: String = station_file
-            .split("/")
-            .collect::<Vec<&str>>()
-            .get(2)
-            .expect("Non-standard station filename format")
-            .to_string();
-        println!("station_name = {station_name}");
-        let coordinates: Coordinates = self.coordinate_map.get(&station_name).map(|&x| x).unwrap();
-        println!("{:?}", field_1);
+//         // Find station name, which is HashMap key for Coordinates
+//         let station_name: String = station_file
+//             .split("/")
+//             .collect::<Vec<&str>>()
+//             .get(2)
+//             .expect("Non-standard station filename format")
+//             .to_string();
+//         println!("station_name = {station_name}");
+//         let coordinates: Coordinates = self.coordinate_map.get(&station_name).map(|&x| x).unwrap();
+//         println!("{:?}", field_1);
 
-        // Return Dataset
-        Some(Dataset {
-            field_1,
-            field_2,
-            field_3,
-            coordinates,
-            station_name,
-            index: self.day,
-        })
-    }
+//         // Return Dataset
+//         Some(Dataset {
+//             field_1,
+//             field_2,
+//             field_3,
+//             coordinates,
+//             station_name,
+//             index: self.day,
+//         })
+//     }
 
-    /// Computes remaining number of files
-    pub fn len(&self) -> usize {
-        self.station_files.len()
-    }
-}
+//     /// Computes remaining number of files
+//     pub fn len(&self) -> usize {
+//         self.station_files.len()
+//     }
+// }
 
 #[derive(Clone)]
 pub struct Chunk {
@@ -294,24 +298,24 @@ pub struct DatasetLoader {
     /// A semivalid chunk is a set of days for which there exists a data file. It is semi-valid because
     /// (at the very least) the data file exists, but the data file may still contain NaNs and thus be invalid.
     pub semivalid_chunks: Arc<DashMap<Index, Vec<Chunk>>>,
-    days: Range<usize>,
     stationarity: Stationarity,
     // chunk: usize,
 }
 
 impl DatasetLoader {
     // This function gathers all metadata required for loading a chunk of data
-    pub fn new(days: Option<Range<usize>>, stationarity: Stationarity) -> Self {
+    pub fn new(stationarity: Stationarity) -> Self {
         // Construct coordinate map
         let coordinate_map = Arc::new(construct_coordinate_map());
+        log::trace!("constructed coordinate map");
 
         // Find all stations for which there is data for this year
-        let semivalid_chunks = retrieve_chunks(days.clone(), stationarity);
+        let semivalid_chunks = retrieve_chunks(stationarity);
+        log::trace!("retrieved chunks");
 
         Self {
             coordinate_map,
             semivalid_chunks,
-            days: days.unwrap_or(DATA_DAYS),
             stationarity,
         }
     }
@@ -338,18 +342,22 @@ impl DatasetLoader {
                             .get(2)
                             .unwrap()
                             .to_string();
-                        _load_chunk(
+                        // log::trace!("loading {station_name}/{index}");
+                        let chunk = _load_chunk(
                             index,
                             chunk.clone(),
                             *self.coordinate_map.get(&station_name).unwrap(),
                             &station_name,
                         )
-                        .await
+                        .await;
+                        log::trace!("loaded {station_name}/{index}");
+                        chunk
                     })
                     .collect::<Vec<_>>();
 
                 // Get all ordered, combined datasets
-                let data: Vec<Dataset> = join_all(futs).await;
+                let data: Vec<Dataset> = futures::stream::iter(futs).buffered(5).collect().await;
+                println!("loaded all chunk datasets");
 
                 for (chunk, data) in chunks.iter().zip(data) {
                     let cleaned_station_name: String = chunk
@@ -359,8 +367,16 @@ impl DatasetLoader {
                         .get(2)
                         .unwrap()
                         .to_string();
-                    assert!(result.insert(cleaned_station_name, data).is_none());
+                    log::trace!(
+                        "inserting {cleaned_station_name} at sec {}",
+                        chunk.start_sec
+                    );
+                    assert!(
+                        result.insert(cleaned_station_name, data).is_none(),
+                        "duplicate entry"
+                    );
                 }
+                log::trace!("inserted all chunks into map");
 
                 Ok(result)
             }
@@ -385,7 +401,10 @@ async fn _load_chunk(
         .collect::<Vec<_>>();
 
     // Execute futures concurrently on one thread with join_all
-    let mut datasets: Vec<[TimeSeries; 3]> = join_all(dataset_futures).await;
+    let mut datasets: Vec<[TimeSeries; 3]> = futures::stream::iter(dataset_futures)
+        .buffered(5)
+        .collect()
+        .await;
 
     // Concatenate datasets
     let [mut field_1, mut field_2, field_3]: [TimeSeries; 3] = {
@@ -409,20 +428,26 @@ async fn _load_chunk(
     //
     // First get interpolator
     let interpolator = IGRF_DATA_INTERPOLATOR.interpolator(station);
+
     (field_1, field_2) = match field_1
-        .into_iter()
-        .zip(field_2.into_iter())
+        .as_slice()
+        .unwrap()
+        .into_par_iter()
+        .zip(field_2.as_slice().unwrap())
         .enumerate()
-        .map(|(sec, (f1, f2))| {
+        .map(|(sec, (&f1, &f2))| {
             // Interpolate declination to this second
             let sec_declination = interpolator
-                .interpolate_checked((chunk.start_sec + sec) as f64)
-                .unwrap();
+                .interpolate_checked(
+                    shift_point(chunk.start_sec + sec)
+                        .expect("something went wrong with chunk seconds"),
+                )
+                .expect(&format!(
+                    "failed on station {station} on chunk index {}",
+                    index
+                ));
             // Apply rotations
-            (
-                apply_rotation_f1(f1, f2, sec_declination as f32),
-                apply_rotation_f2(f1, f2, sec_declination as f32),
-            )
+            apply_rotation(f1, f2, sec_declination as f32)
         })
         .unzip()
     {
@@ -442,6 +467,7 @@ async fn _load_chunk(
 
 async fn load_daily(filepath: PathBuf) -> [TimeSeries; 3] {
     // Open file
+    // log::trace!("loading {}", filepath.display());
     let mut file = tokio::fs::File::open(filepath)
         .await
         .expect("failed to open daily file");
@@ -473,63 +499,48 @@ fn retrieve_stations(year: usize) -> Vec<String> {
     paths
 }
 
-fn retrieve_chunks(
-    days: Option<Range<usize>>,
-    stationarity: Stationarity,
-) -> Arc<DashMap<Index, Vec<Chunk>>> {
-    // Gather paths to all stations
-    let stations: Vec<_> = glob("../stations/*")
-        .unwrap()
-        .map(|x| x.unwrap())
-        .collect::<Vec<_>>();
-    let station_days: std::collections::HashSet<PathBuf> = glob("../stations/*/*")
-        .unwrap()
-        .map(|x| x.unwrap())
-        .collect();
-
-    // Initialize DashMap containing semivalid chunks
-    let semivalid_chunks = Arc::new(DashMap::new());
-
+fn retrieve_chunks(stationarity: Stationarity) -> Arc<DashMap<Index, Vec<Chunk>>> {
     // Iterate through every chunk of days
-    stationarity
-        .get_chunks()
-        .into_iter()
-        .enumerate()
-        .for_each(|(index, chunk)| {
-            // Initialize vector which holds which stations contain semi-valid data for this chunk
-            let chunks: Vec<Chunk> = stations
-                .iter()
-                .filter_map(|station| {
-                    // Check if files exist for that (station, chunk)
-                    // First, construct file paths.
-                    let files: Vec<PathBuf> = chunk
-                        .clone()
-                        .map(|day| PathBuf::from(format!("{}/{day}", station.display())))
-                        .collect();
+    Arc::new(
+        stationarity
+            .get_chunks()
+            .into_par_iter()
+            .inspect(|chunk| println!("{chunk:?}"))
+            .enumerate()
+            .map(|(index, chunk)| {
+                // Initialize vector which holds which stations contain semi-valid data for this chunk
+                let chunks: Vec<Chunk> = STATIONS
+                    .par_iter()
+                    .filter_map(move |station| {
+                        // Check if files exist for that (station, chunk)
+                        // First, construct file paths.
+                        let files: Vec<PathBuf> = chunk
+                            .clone()
+                            .map(|day| PathBuf::from(format!("{}/{day}", station.display())))
+                            .collect();
 
-                    // Get the second at which this chunk begins
-                    let start_sec = chunk.start * SECONDS_PER_DAY + 1;
+                        // Get the second at which this chunk begins
+                        let (start_sec, _) = stationarity.get_year_indices(index + 1998);
 
-                    // Then check if they all exist
-                    if files.iter().all(|file| station_days.contains(file)) {
-                        // If so, return `Chunk`
-                        Some(Chunk {
-                            station: station.display().to_string(),
-                            files,
-                            start_sec,
-                        })
-                    } else {
-                        // Otherwise, don't include this station for this chunk
-                        None
-                    }
-                })
-                .collect();
-
-            // Add entries to semivalid_chunks
-            semivalid_chunks.insert(index, chunks);
-        });
-
-    semivalid_chunks
+                        // Then check if they all exist
+                        if files.par_iter().all(|file| STATION_DAYS.contains(file)) {
+                            // If so, return `Chunk`
+                            Some(Chunk {
+                                station: station.display().to_string(),
+                                files,
+                                start_sec,
+                            })
+                        } else {
+                            // Otherwise, don't include this station for this chunk
+                            None
+                        }
+                    })
+                    .collect();
+                log::trace!("index {index} has {} semivalid elements", chunks.len());
+                (index, chunks)
+            })
+            .collect(),
+    )
 }
 
 fn retrieve_stations_daily(day: usize) -> Vec<String> {
@@ -563,7 +574,7 @@ fn validate_buffer_size(buffer: &[u8], expected_size: usize, year: usize) -> Res
 }
 
 /// This is a recursive function that returns the number of days since the first day there was data.
-pub fn day_since_first(day: usize, year: usize) -> usize {
+pub const fn day_since_first(day: usize, year: usize) -> usize {
     match year {
         1998 => day,
         1999.. => {

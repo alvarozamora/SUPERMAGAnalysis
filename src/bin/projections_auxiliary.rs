@@ -4,18 +4,23 @@ use supermag_analysis::utils::async_balancer::Balancer;
 use supermag_analysis::weights::{Analysis, Stationarity};
 
 fn main() {
-    env_logger::builder().filter_level(log::LevelFilter::Debug);
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Trace)
+        .init();
 
     // Define stationarity time, Coherence time
     const STATIONARITY_TIME: Stationarity = Stationarity::Yearly;
-    // let coherence = Coherence::Days(1); // TODO: stationarity
+
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(16)
+        .build_global()
+        .unwrap();
 
     // Which subset of the data to use
     let days_to_use = DATA_DAYS;
-    // let days_to_use = day_since_first(0, 2004)..day_since_first(0, 2020);
 
     // Start Balancer
-    let mut balancer = Balancer::new(32, 2);
+    let mut balancer = Balancer::new(16, 1);
 
     // Initialize Theory
     let theory = DarkPhoton::initialize(1.0);

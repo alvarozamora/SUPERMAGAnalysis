@@ -7,14 +7,17 @@ use rustfft::FftPlanner;
 use serde_derive::{Serialize, Deserialize};
 use tokio::sync::Semaphore;
 use std::sync::Arc;
-use crate::{utils::{
+use crate::{
+    utils::{
     loader::Dataset,
     approximate_sidereal, coordinates::Coordinates, fft::get_frequency_range_1s,
-}, constants::{SIDEREAL_DAY_SECONDS}, weights::in_longest_subset};
+    },
+    constants::SIDEREAL_DAY_SECONDS,
+};
 use std::{
     ops::{Mul, Div, Add, Range, Sub},
 };
-use ndrustfft::{FftHandler, ndfft, ndfft_par};
+use ndrustfft::{FftHandler, ndfft_par};
 use rayon::prelude::*;
 use ndarray::{s, ScalarOperand, Array2, Axis};
 use num_traits::{ToPrimitive, Float, Num};
@@ -174,7 +177,8 @@ impl Theory for DarkPhoton {
         // Initialize projection table
         let projection_table = DashMap::new();
 
-        for nonzero_element in DARK_PHOTON_NONZERO_ELEMENTS.iter() {
+        // for nonzero_element in DARK_PHOTON_NONZERO_ELEMENTS.iter() {
+        DARK_PHOTON_NONZERO_ELEMENTS.par_iter().for_each(|nonzero_element| {
 
             // size of dataset
             let size = chunk_dataset.iter().next().unwrap().value().field_1.len();
@@ -183,13 +187,15 @@ impl Theory for DarkPhoton {
             // stations in weight_n are a subset (filtered) of those in chunk_dataset.
             // Could perhaps save memory by dropping coressponding invalid datasets in chunk_dataset.
             let combined_time_series: TimeSeries = weights_n
-                .iter()
+                .par_iter()
                 .map(|key_value| {
 
                     // Unpack (key, value) pair
                     // Here, key is StationName and value = dataset
                     let station_name = key_value.key();
                     let dataset = chunk_dataset.get(station_name).unwrap();
+
+                    log::trace!("calculating {} projections for {station_name} on index {}", nonzero_element.name.as_ref().unwrap(), dataset.index);
 
                     // Get product of relevant component of vector spherical harmonics and of the magnetic field.
                     let relevant_product = match nonzero_element.assc_mode {
@@ -231,7 +237,7 @@ impl Theory for DarkPhoton {
 
             // Insert combined time series for this nonzero element for this chunk, ensuring no duplicate entry
             assert!(projection_table.insert(nonzero_element.clone(), combined_time_series).is_none(), "Somehow made a duplicate entry");
-        }
+        });
 
         projection_table
     }
@@ -1934,15 +1940,14 @@ fn dark_photon_auxiliary_values(
     // Gather coordinate table
     let coordinates = construct_coordinate_map();
 
-    // Get size of series
-    let size = weights_wn.len();
+    let auxiliary_values = [1, 2, 3, 4, 5, 6, 7].into_par_iter().map(|i| {
 
-    let auxiliary_values = [1, 2, 3, 4, 5, 6, 7].map(|i| {
+        log::trace!("calculating auxiliary value H{i}");
 
         // Here we iterate thrhough weights_n and not chunk_dataset because
         // stations in weight_n are a subset (filtered) of those in chunk_dataset.
         // Could perhaps save memory by dropping coressponding invalid datasets in chunk_dataset.
-        let auxiliary_value_series_unnormalized: TimeSeries = weights_n
+        let auxiliary_value_series_unnormalized: f32 = weights_n
             .iter()
             .map(|key_value| {
 
@@ -1984,8 +1989,8 @@ fn dark_photon_auxiliary_values(
                 };
 
                 auxiliary_value
-            })
-            .fold(TimeSeries::default(size), |acc, series| acc.add(series));
+            }).sum();
+            // .fold(|| TimeSeries::default(size), |acc, station_aux| acc + station_aux);
 
             // Divide by correct Wi
             let auxiliary_value_series_normalized = match i {
@@ -2000,7 +2005,7 @@ fn dark_photon_auxiliary_values(
             }; 
 
         auxiliary_value_series_normalized
-    });
+    }).collect::<Vec<_>>().try_into().unwrap();
 
     auxiliary_values
 }
@@ -2314,8 +2319,8 @@ impl FromChunkMap for DarkPhotonAuxiliary {
         // Initialize auxiliary array to zeros
         let (start_first, _) = stationarity.get_year_indices(starting_value);
         let (_, end_last) = stationarity.get_year_indices(starting_value + size);
-        let mut auxiliary_values = [(); 7]
-            .map(|_| TimeSeries::zeros(end_last - start_first + 1));
+        let auxiliary_values = [(); 7]
+            .map(|_| Mutex::new(TimeSeries::zeros(end_last - start_first + 1)));
 
         // auxiliary_values_chunked
         //     .iter()
@@ -2351,15 +2356,17 @@ impl FromChunkMap for DarkPhotonAuxiliary {
             let end_index = values_assigned + auxiliary.h[0].len();
             values_assigned += auxiliary.h[0].len();
 
-            for i in 0..7 {
+            (0..7).into_par_iter().for_each(|i| {
                 auxiliary_values
-                    .get_mut(i)
+                    .get(i)
+                    .unwrap()
+                    .lock()
                     .unwrap()
                     .slice_mut(s![start_index..end_index])
                     .assign(&auxiliary.h[i]);
-            }
+            });
         }
 
-        DarkPhotonAuxiliary { h: auxiliary_values }
+        DarkPhotonAuxiliary { h: auxiliary_values.map(Mutex::into_inner).map(|h| h.unwrap()) }
     }
 }

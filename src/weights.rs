@@ -10,29 +10,12 @@ use ndarray::{s, Array1};
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
 use tokio::{fs::File, io::AsyncWriteExt};
-use std::{sync::Arc, ops::{RangeInclusive, Add}, error::Error, marker::PhantomData};
+use std::{sync::{Arc, Mutex}, ops::{RangeInclusive, Add}, error::Error, marker::PhantomData};
 use std::collections::HashSet;
 use std::ops::AddAssign;
-use dashmap::try_result::TryResult;
 use std::ops::Range;
-use rayon::iter::{ParallelIterator};
+use rayon::{iter::{ParallelIterator}, prelude::IntoParallelRefIterator};
 use mpi::point_to_point::{Source, Destination};
-
-
-macro_rules! debug_print {
-    ($($e:expr),+) => {
-        {
-            #[cfg(debug_assertions)]
-            {
-                println!($($e),+)
-            }
-            #[cfg(not(debug_assertions))]
-            {
-                ($($e),+)
-            }
-        }
-    };
-}
 
 
 type Index = usize;
@@ -119,7 +102,8 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         println!("Running Analysis");
 
         // Grab dataset loader for the chunks
-        let loader = Arc::new(DatasetLoader::new(days.clone(), stationarity));
+        let loader = Arc::new(DatasetLoader::new(stationarity));
+        log::trace!("initialized loader");
 
         // Initialize empty `Weights`
         let weights: Arc<Weights> = Arc::new(Weights {
@@ -129,6 +113,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 we: DashMap::new(),
                 stationarity,
         });
+        log::trace!("initialized weights");
 
         // Initialize empty data vector, projections
         let projections = Arc::new(DashMap::new());
@@ -140,6 +125,9 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         // Calculate local set of tasks
         let set: Range<usize> = 0..loader.semivalid_chunks.len();
         let mut local_set: Option<Vec<usize>> = balancer.local_set(&set.collect());
+        log::debug!("initialized local set");
+
+    
 
         // This loop calculates weights
         while let Some(Some(entry)) = local_set.as_mut().map(Vec::pop) {
@@ -152,12 +140,14 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             let local_auxiliary: Arc<_> = auxiliary_values.clone();
 
             // Create a new task for each `chunk`
+            log::debug!("pushing task for entry {entry}");
+
             balancer.
-                task(Box::new( async move { tokio::task::spawn( async move {
+                task(Box::new( async move {
 
                     // Get chunk index
                     let index: Index = local_loader.semivalid_chunks.entry(entry).into_key();
-                    debug_print!("{:?} working on index {index}", std::thread::current().id());
+                    log::info!("{:?} working on index {index}", std::thread::current().id());
 
                     // Load datasets for this chunk
                     let datasets: DashMap<StationName, Dataset> = local_loader.load_chunk(index).await.unwrap();
@@ -165,55 +155,57 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
                     // e.g. on a year boundary where all stations change
                     if datasets.len() == 0 {
-                        debug_print!("Empty chunk. Proceeding to next chunk");
+                        log::debug!("Empty chunk. Proceeding to next chunk");
                         return ()
                     }
 
                     // Local hashmaps and time series
+                    log::trace!("Initializing weights with size {dataset_length}");
                     let local_hashmap_n: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
                     let local_hashmap_e: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
-                    let mut local_wn: TimeSeries = Array1::from_vec(vec![0.0_f32; dataset_length * SECONDS_PER_DAY]);
-                    let mut local_we: TimeSeries = Array1::from_vec(vec![0.0_f32; dataset_length * SECONDS_PER_DAY]);
-                    
+                    let local_wn: Arc<Mutex<TimeSeries>> = Arc::new(Mutex::new(Array1::from_vec(vec![0.0_f32; dataset_length])));
+                    let local_we: Arc<Mutex<TimeSeries>> = Arc::new(Mutex::new(Array1::from_vec(vec![0.0_f32; dataset_length])));
+                    log::trace!("Initialized weights with size {dataset_length}");
+
                     // Calculate weights based on datasets for this chunk (stationarity period)
                     calculate_weights_for_chunk(
                         index,
                         &local_hashmap_n,
                         &local_hashmap_e,
-                        &mut local_wn,
-                        &mut local_we,
+                        Arc::clone(&local_wn),
+                        Arc::clone(&local_we),
                         &datasets,
                     ).await;
-                    debug_print!("Finished weights for index {index}");
-                    debug_print!("local_hashmap_n has {} entries", local_hashmap_n.len());
-                    debug_print!("local_hashmap_n has {} entries", local_hashmap_n.len());
+                    log::debug!("Finished weights for index {index}");
+                    log::debug!("local_hashmap_n has {} entries", local_hashmap_n.len());
+                    log::debug!("local_hashmap_n has {} entries", local_hashmap_n.len());
                     // e.g. all stations have nans for all values for this chunk
                     if local_hashmap_n.len() < T::MIN_STATIONS { 
-                        println!("Invalid chunk, as there are less than {} stations with data in this chunk. Proceeding to next chunk", T::MIN_STATIONS);
-                        return ()
-                    } else if local_wn.iter().any(|&x| x == 0.0) {
-                        println!("Invalid chunk, as there is at least one time slot with a normalization weight of 0.0");
-                        return ()
+                        log::warn!("Invalid chunk, as there are less than {} stations with data in this chunk. Proceeding to next chunk", T::MIN_STATIONS);
+                        return;
+                    } else if local_wn.lock().unwrap().par_iter().any(|&x| x == 0.0) {
+                        log::warn!("Invalid chunk, as there is at least one time slot with a normalization weight of 0.0");
+                        return;
                     }
 
                     // Calculate projections for this chunk. 
                     // This is done here despite potentially discarding result later if chunk is not in largest contiguous subset because
                     // we do not want to repeat I/O with hundreds of gigabytes of data. I.e. we already have the data in memory here.
-                    debug_print!("calculating projections");
+                    log::debug!("calculating projections");
                     let chunk_projections: DashMap<NonzeroElement, TimeSeries> = local_theory
                         .calculate_projections(
                             &local_hashmap_n,
                             &local_hashmap_e,
-                            &local_wn,
-                            &local_we,
+                            &local_wn.lock().unwrap(),
+                            &local_we.lock().unwrap(),
                             &datasets
                         );
                     let chunk_auxiliary = local_theory
                         .calculate_auxiliary_values(
                             &local_hashmap_n,
                             &local_hashmap_e,
-                            &local_wn,
-                            &local_we,
+                            &local_wn.lock().unwrap(),
+                            &local_we.lock().unwrap(),
                             &datasets
                         );
                     assert!(local_projections.insert(index, chunk_projections).is_none(), "A duplicate projection entry was made");
@@ -222,32 +214,38 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     // Add weights to dashmap
                     local_weights.n.insert(index,local_hashmap_n);
                     local_weights.e.insert(index,local_hashmap_e);
-                    // This is completely unnecessary but was a cool piece of code that I wrote to async-ify dashmap access.
-                    // Keeping it for future reference. Should not do much for our particular application, and may even positively
-                    // affect performance during simultaneous attempts to access the same shard.
-                    loop {
-                        match local_weights.wn.try_get_mut(&index) {
-                            TryResult::Present(_) => { panic!("some other thread somehow worked on this chunk") },
-                            TryResult::Absent => { local_weights.wn.insert(index, local_wn);  break },
-                            TryResult::Locked => { tokio::task::yield_now().await },
-                        }
-                    }
-                    loop {
-                        match local_weights.we.try_get_mut(&index) {
-                            TryResult::Present(_) => { panic!("some other thread somehow worked on this chunk") },
-                            TryResult::Absent => { local_weights.we.insert(index, local_we);  break },
-                            TryResult::Locked => { tokio::task::yield_now().await },
-                        }
-                    }
-                }).await.unwrap()
+                    local_weights.wn.insert(index, Arc::try_unwrap(local_wn).unwrap().into_inner().unwrap());
+                    local_weights.we.insert(index, Arc::try_unwrap(local_we).unwrap().into_inner().unwrap());
+                    // // This is completely unnecessary but was a cool piece of code that I wrote to async-ify dashmap access.
+                    // // Keeping it for future reference. Should not do much for our particular application, and may even positively
+                    // // affect performance during simultaneous attempts to access the same shard.
+                    // use dashmap::try_result::TryResult;
+                    // loop {
+                    //     match local_weights.wn.try_get_mut(&index) {
+                    //         TryResult::Present(_) => { panic!("some other thread somehow worked on this chunk") },
+                    //         TryResult::Absent => { local_weights.wn.insert(index, local_wn);  break },
+                    //         TryResult::Locked => { tokio::task::yield_now().await },
+                    //     }
+                    // }
+                    // loop {
+                    //     match local_weights.we.try_get_mut(&index) {
+                    //         TryResult::Present(_) => { panic!("some other thread somehow worked on this chunk") },
+                    //         TryResult::Absent => { local_weights.we.insert(index, local_we);  break },
+                    //         TryResult::Locked => { tokio::task::yield_now().await },
+                    //     }
+                    // }
+                    log::info!("finished index {index}");
+
             }));
         }
 
         // Wait for all tasks on this node to finish, and check that they all succeeded
-        println!("About to buffer_await");
+        log::debug!("About to buffer_await");
         let result: Vec<()> = balancer.buffer_await().await;
         assert!(result.iter().all(|&x| x == ()));
+        log::debug!("Rank {} about to barrier", balancer.rank);
         balancer.barrier();
+        log::debug!("passed barrier");
 
         // Flatten all chunks over which this largest contiguous subset spans
         // to get T::NONZERO_ELEMENTS number of large series. This essentially flattens
@@ -273,11 +271,11 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
                         if send_to_rank != rank {
                             if my_nonzero_chunks.len() > 0 {
-                                debug_print!("rank {rank} about to send {} nonzero chunks {:?} to {send_to_rank}", my_nonzero_chunks.len(), &my_nonzero_chunks);
+                                log::debug!("rank {rank} about to send {} nonzero chunks {:?} to {send_to_rank}", my_nonzero_chunks.len(), &my_nonzero_chunks);
                                 balancer.world.process_at_rank(send_to_rank as i32).send(&my_nonzero_chunks);
                             } else {
                                 // send empty
-                                debug_print!("rank {rank} about to send empty to {send_to_rank}");
+                                log::debug!("rank {rank} about to send empty to {send_to_rank}");
                                 balancer.world.process_at_rank(send_to_rank as i32).send(&empty);
                             }
 
@@ -291,7 +289,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                         .any_process()
                         .receive_vec::<Index>();
 
-                    debug_print!("rank {} received from rank {}: {:?}", balancer.rank, status.source_rank(), &other_nonzero_chunks);
+                    log::debug!("rank {} received from rank {}: {:?}", balancer.rank, status.source_rank(), &other_nonzero_chunks);
 
                     if empty != other_nonzero_chunks {
                         all_nonzero_chunks.append(&mut other_nonzero_chunks);
@@ -329,7 +327,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                         for send_to_rank in 0..balancer.size {
 
                             if send_to_rank != balancer.rank {
-                                debug_print!("Rank {} about to send {} f32s [{:?} .. ] for index {} to rank {}", balancer.rank, element_data.len(), &element_data[..3], nonzero_chunk, send_to_rank);
+                                log::debug!("Rank {} about to send {} f32s [{:?} .. ] for index {} to rank {}", balancer.rank, element_data.len(), &element_data[..3], nonzero_chunk, send_to_rank);
 
                                 balancer.world
                                     .process_at_rank(send_to_rank as i32)
@@ -350,7 +348,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
                         // let mut buffer_for_recieving: Vec<f32> = Vec::with_capacity(size); // This heap allocation is necessary, and ownership will be passed onto the dashmap
 
-                        debug_print!("rank {} about to receive f32s", balancer.rank);
+                        log::debug!("rank {} about to receive f32s", balancer.rank);
                         let (buffer_for_recieving, _status) = balancer.world
                             .any_process()
                             .receive_vec::<f32>();
@@ -372,11 +370,12 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
             }
 
             // Now that all ranks have all of the data, need to find longest contiguous subset of chunks
+            const ZERO_INDEX_OFFSET: usize = 1998;
             let (size, starting_value): (usize, usize) = {
             
                 // To do this we first gather all chunks
                 let set: Vec<usize> = projections
-                    .par_iter_mut()
+                    .par_iter()
                     .map(|pair| *pair.key())
                     .collect();
 
@@ -384,16 +383,15 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 get_largest_contiguous_subset(&set)
             };
             println!("rank {}: longest contiguous subset of chunks begins at {starting_value} and has length {size} chunks", balancer.rank);
-            println!("rank {}: this starts on year {:?} and ends on year {:?}", balancer.rank, starting_value, starting_value + size);
+            println!("rank {}: this starts on year {:?} and ends on year {:?}", balancer.rank, starting_value + ZERO_INDEX_OFFSET, starting_value + size + ZERO_INDEX_OFFSET);
 
-            // TODO: generalize to sec
-            let (start_first, _) = stationarity.get_year_indices(starting_value);
-            let (_, end_last) = stationarity.get_year_indices(starting_value + size);
+            let (start_first, _) = stationarity.get_year_indices(starting_value + ZERO_INDEX_OFFSET);
+            let (_, end_last) = stationarity.get_year_indices(starting_value + size + ZERO_INDEX_OFFSET);
 
             let complete_series = Arc::new(DashMap::new());
             for element in &nonzero_elements {
                 let empty_array = TimeSeries::zeros(end_last - start_first + 1);
-                debug_print!("initializing map element {:?} with zeros array of len {}", element, end_last - start_first + 1);
+                log::debug!("initializing map element {:?} with zeros array of len {}", element, end_last - start_first + 1);
                 complete_series.insert(element.clone(), empty_array);
             }
 
@@ -409,22 +407,19 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     }
 
                     chunk_map
-                        .iter()
+                        .par_iter()
                         .for_each(|element| {
                         
                             // get element and its correpsonding series
                             let (element, series) = element.pair();
 
                             // Insert array into complete series
-                            // TODO: THIS ASSUMES ALL CHUNKS ARE THE SAME LENGTH.
-                            // NEED TO CHANGE FOR YEARLY STATIONARITY AND PERHAPS THE EDGE CHUNKS.
-                            let start_index = (current_chunk-starting_value)*series.len();
-                            let end_index = start_index + series.len();
+                            let (start_year, end_year) = stationarity.get_year_indices(current_chunk + ZERO_INDEX_OFFSET);
 
                             complete_series
                                 .get_mut(element)
                                 .unwrap()
-                                .slice_mut(s![start_index..end_index])
+                                .slice_mut(s![start_year..=end_year])
                                 .assign(&series);
                         })
                 });
@@ -457,11 +452,11 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 
                         if send_to_rank != rank {
                             if my_nonzero_chunks.len() > 0 {
-                                debug_print!("rank {rank} about to send {} nonzero chunks {:?} to {send_to_rank}", my_nonzero_chunks.len(), &my_nonzero_chunks);
+                                log::debug!("rank {rank} about to send {} nonzero chunks {:?} to {send_to_rank}", my_nonzero_chunks.len(), &my_nonzero_chunks);
                                 balancer.world.process_at_rank(send_to_rank as i32).send(&my_nonzero_chunks);
                             } else {
                                 // send empty
-                                debug_print!("rank {rank} about to send empty to {send_to_rank}");
+                                log::debug!("rank {rank} about to send empty to {send_to_rank}");
                                 balancer.world.process_at_rank(send_to_rank as i32).send(&empty);
                             }
 
@@ -475,7 +470,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                         .any_process()
                         .receive_vec::<Index>();
 
-                    debug_print!("rank {} received from rank {}: {:?}", balancer.rank, status.source_rank(), &other_nonzero_chunks);
+                    log::debug!("rank {} received from rank {}: {:?}", balancer.rank, status.source_rank(), &other_nonzero_chunks);
 
                     if empty != other_nonzero_chunks {
                         all_nonzero_chunks.append(&mut other_nonzero_chunks);
@@ -503,7 +498,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     for send_to_rank in 0..balancer.size {
 
                         if send_to_rank != balancer.rank {
-                            debug_print!("Rank {} about to send {} auxiliary bytes [{:?} .. ] for index {} to rank {}", balancer.rank, chunk_auxiliary.len(), &chunk_auxiliary[..3], nonzero_chunk, send_to_rank);
+                            log::debug!("Rank {} about to send {} auxiliary bytes [{:?} .. ] for index {} to rank {}", balancer.rank, chunk_auxiliary.len(), &chunk_auxiliary[..3], nonzero_chunk, send_to_rank);
 
                             balancer.world
                                 .process_at_rank(send_to_rank as i32)
@@ -515,7 +510,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     balancer.barrier();
                 } else {
 
-                    debug_print!("rank {} about to receive auxiliary f32s", balancer.rank);
+                    log::debug!("rank {} about to receive auxiliary f32s", balancer.rank);
                     let (buffer_for_recieving, _status) = balancer.world
                         .any_process()
                         .receive_vec::<u8>();
@@ -538,7 +533,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 // To do this we first gather all chunks
                 // NOTE: this only works for days
                 let set: Vec<usize> = auxiliary_values
-                    .par_iter_mut()
+                    .par_iter()
                     .map(|pair| *pair.key())
                     .collect();
 
@@ -546,7 +541,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 get_largest_contiguous_subset(&set)
             };
             println!("rank {}: longest contiguous subset of chunks of auxilary values begins at {starting_value} and has length {size} chunks", balancer.rank);
-            start_second = starting_value * 24 * 60 * 60;
+            (start_second, _) = stationarity.get_year_indices(starting_value);
 
             // TODO: generalize to yearly
             // let secs_per_chunk: usize = SECONDS_PER_DAY * days_per_chunk;
@@ -677,7 +672,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
 #[derive(Copy, Clone, Debug)]
 pub enum Stationarity {
     Yearly,
-    Daily(usize),
+    // Daily(usize),
 }
 
 impl Stationarity {
@@ -707,19 +702,17 @@ impl Stationarity {
 
     /// Get chunks. Indices returned correspond to days, not seconds
     pub fn get_chunks(&self) -> Vec<Range<usize>> {
-        let mut chunks = vec![];
         match self {
             Stationarity::Yearly => {
-                (1998..2020)
-                    .for_each(|year| {
-                        chunks.push(day_since_first(0,year)..day_since_first(0,year+1));
-                    })
+                (1998..=2020)
+                    .map(|year| {
+                        day_since_first(0,year)..day_since_first(0,year+1)
+                    }).collect()
             }
-            Stationarity::Daily(_) => {
-                unimplemented!("only doing yearly for now")
-            }
+            // Stationarity::Daily(_) => {
+            //     unimplemented!("only doing yearly for now")
+            // }
         }
-        chunks
     }
 }
 
@@ -852,13 +845,13 @@ async fn calculate_weights_for_chunk(
     index: Index,
     local_hashmap_n: &DashMap<StationName, Weight>,
     local_hashmap_e: &DashMap<StationName, Weight>,
-    local_wn: &mut TimeSeries,
-    local_we: &mut TimeSeries,
+    local_wn: Arc<Mutex<TimeSeries>>,
+    local_we: Arc<Mutex<TimeSeries>>,
     datasets: &DashMap<StationName, Dataset>,
     // local_valid_seconds: Arc<DashMap<usize /* index */, usize /* count */>>,
 ) {
     datasets
-        .iter()
+        .par_iter()
         .for_each(|dataset| {
         
             // Unpack value from (key, value) pair from DashMap
@@ -883,6 +876,7 @@ async fn calculate_weights_for_chunk(
                     .unzip();
                 (Array1::from_vec(entries), Array1::from_vec(field)) 
             };
+            log::trace!("cleaned field 1");
             let (valid_entries_2, clean_field_2): (Array1<bool>, TimeSeries) = {
                 let (entries, field): (Vec<bool>, Vec<f32>) = dataset.field_2
                     .iter()
@@ -890,6 +884,7 @@ async fn calculate_weights_for_chunk(
                     .unzip();
                 (Array1::from_vec(entries), Array1::from_vec(field)) 
             };
+            log::trace!("cleaned field 2");
 
             // // Mark valid seconds
             // let num_seconds_per_chunk: usize = local_wn.len();
@@ -901,8 +896,8 @@ async fn calculate_weights_for_chunk(
             //         sec + 1
             //     });
 
-            if cfg!(debug_assertions) {
-                println!(
+            // if cfg!(debug_assertions) {
+                log::debug!(
                     "Station {} has {} null entries ({:.1}%) for chunk index {}",
                     &dataset.station_name,
                     dataset.field_1.len() - num_samples,
@@ -910,7 +905,7 @@ async fn calculate_weights_for_chunk(
                     index,
                 );
                 
-                println!(
+                log::debug!(
                     "Station {} has {:?} min/max entries for chunk index {}",
                     &dataset.station_name,
                     clean_field_1.fold((0.0, 0.0), |mut acc, &x| {
@@ -924,21 +919,25 @@ async fn calculate_weights_for_chunk(
                     }),
                     index,
                 );
-            }
+            // }
 
             // Calculate weights
-            let n_weight: f32 = (clean_field_1.dot(&clean_field_1) / num_samples as f32).recip();
-            let e_weight: f32 = (clean_field_2.dot(&clean_field_2) / num_samples as f32).recip();
+            log::trace!("dotting fields 1, which has length and {}", clean_field_1.len());
+            let n_weight: f32 = (clean_field_1.fold(0.0, |s, f| s + f * f) / num_samples as f32).recip();
+            log::trace!("dotting fields 2, which has length and {}", clean_field_2.len());
+            let e_weight: f32 = (clean_field_2.fold(0.0, |s, f| s + f * f) / num_samples as f32).recip();
 
+            log::trace!("calculating wn/we time series");
             let wn_weight: TimeSeries = valid_entries_1.map(|&is_valid| if is_valid { n_weight } else { 0.0 });
             let we_weight: TimeSeries = valid_entries_2.map(|&is_valid| if is_valid { e_weight } else { 0.0 });
 
             // Add to local hashmaps and time series
             let clean_station_name: String = dataset.station_name.clone().split("/").collect::<Vec<_>>().get(2).unwrap().to_string();
+            log::trace!("inserting all weights");
             local_hashmap_n.insert(clean_station_name.clone(), n_weight);
             local_hashmap_e.insert(clean_station_name, e_weight);
-            local_wn.add_assign(&wn_weight);
-            local_we.add_assign(&we_weight);
+            local_wn.lock().unwrap().add_assign(&wn_weight);
+            local_we.lock().unwrap().add_assign(&we_weight);
         });
 }
 

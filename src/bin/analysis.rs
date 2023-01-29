@@ -20,7 +20,7 @@ fn main() {
     let mut sys = System::new_all();
 
     // Define stationarity time, Coherence time
-    const STATIONARITY_TIME: Stationarity = Stationarity::Daily(1);
+    const STATIONARITY_TIME: Stationarity = Stationarity::Yearly;
 
     // Initialize Theory
     let theory = DarkPhoton::initialize(1.0);
@@ -42,16 +42,14 @@ fn main() {
     let mut balancer = Balancer::new(32, 2);
 
     // Compute weights for this coherence time
-    if true {
-        Analysis::analysis(
-            STATIONARITY_TIME,
-            projections_complete,
-            auxiliary_complete,
-            &theory,
-            &mut balancer.manager,
-        )
-        .expect("failed to run analysis");
-    }
+    Analysis::analysis(
+        STATIONARITY_TIME,
+        projections_complete,
+        auxiliary_complete,
+        &theory,
+        &mut balancer.manager,
+    )
+    .expect("failed to run analysis");
 }
 
 fn read_dark_photon_projections_auxiliary() -> Result<

@@ -1,5 +1,4 @@
 use futures::prelude::*;
-use futures::stream::FuturesOrdered;
 use mpi::environment::Universe;
 use mpi::topology::{Communicator, SystemCommunicator};
 use mpi::traits::*;
@@ -112,7 +111,7 @@ impl<T> Manager<T> {
 
         // Pin then execute futures
         let result: Vec<T> = futures::stream::iter(self.tasks.drain(..).map(|fut| Pin::from(fut)))
-            .buffered(self.size * self.buffer)
+            .buffered(self.buffer)
             .collect::<Vec<_>>()
             .await;
 
