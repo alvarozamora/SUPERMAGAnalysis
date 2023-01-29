@@ -1,13 +1,10 @@
 use std::ops::Range;
 
-///  Number of years with data
-pub const DATA_YEARS: usize = 50;
-
 /// Number of leap years in the 1s SUPERMAG dataset
 pub const NUM_LEAP_YEARS: usize = 6;
 
 /// Days for which there is data
-pub const DATA_DAYS: Range<usize> = 0..365*23 + NUM_LEAP_YEARS;
+pub const DATA_DAYS: Range<usize> = 0..365 * (2020 - 1998 + 1) + NUM_LEAP_YEARS;
 
 /// This is the value that appears in the SUPERMAG dataset to represent a null entry.
 pub const SUPERMAG_NAN: f32 = 999999.0;
@@ -36,15 +33,3 @@ pub const INV_VEL_SQ: f64 = 1e6;
 
 // percent level accuracy of all of the frequencies in a frequency bins
 pub const THRESHOLD: f64 = 0.03;
-
-
-pub mod physical_params {
-
-    // units nano tesla squared
-    pub const RHO: f64 = 6.04e7;
-
-    // Radius of earth in units of seconds
-    pub const R: f64  = 0.0212751;
-}
-
-
