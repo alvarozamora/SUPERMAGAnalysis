@@ -1,3 +1,4 @@
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
@@ -11,19 +12,14 @@ fn main() {
         .filter_level(log::LevelFilter::Debug)
         .init();
 
-    // rayon::ThreadPoolBuilder::new()
-    //     .num_threads(24)
-    //     .build_global()
-    //     .unwrap();
-
-    use sysinfo::{NetworkExt, NetworksExt, ProcessExt, System, SystemExt};
+    use sysinfo::{System, SystemExt};
     let mut sys = System::new_all();
 
     // Define stationarity time, Coherence time
     const STATIONARITY_TIME: Stationarity = Stationarity::Yearly;
 
     // Initialize Theory
-    let theory = DarkPhoton::initialize(1.0);
+    let theory = DarkPhoton::new();
 
     // Load in projections and auxiliary values
     let (projections_complete, auxiliary_complete) =
@@ -38,8 +34,20 @@ fn main() {
     println!("total memory: {} bytes", sys.total_memory());
     println!("used memory : {} bytes", sys.used_memory());
 
+    // NaN checker
+    projections_complete
+        .projections_complete
+        .par_iter()
+        .map(|element| {
+            assert!(
+                element.value().par_iter().all(|e| !e.is_nan()),
+                "proj has nan"
+            )
+        })
+        .collect::<Vec<_>>();
+
     // Start Balancer
-    let mut balancer = Balancer::new(32, 2);
+    let mut balancer = Balancer::new(12, 2);
 
     // Compute weights for this coherence time
     Analysis::analysis(
@@ -77,11 +85,11 @@ fn read_dark_photon_projections_auxiliary() -> Result<
 
     // Deserialize bytes into respective types
     let projections_complete: Arc<ProjectionsComplete> = Arc::new(
-        serde_cbor::from_slice(&projection_buffer)
+        bincode::deserialize(&projection_buffer)
             .expect("failed to deserialize projections_complete"),
     );
     let auxiliary_complete: Arc<<DarkPhoton as Theory>::AuxiliaryValue> = Arc::new(
-        serde_cbor::from_slice(&auxiliary_buffer)
+        bincode::deserialize(&auxiliary_buffer)
             .expect("failed to deserialize projections_complete"),
     );
 

@@ -42,7 +42,7 @@ fn main() {
 
 async fn chunk_into_days() {
     // Years for which there is data
-    let years = 1998..=2020;
+    let years = 2020..=2020;
 
     // Futures collector
     let mut futures = vec![];
@@ -297,7 +297,7 @@ async fn process_station_year(station_file: String, year: usize) {
 // }
 
 fn retrieve_stations(year: usize) -> Vec<String> {
-    let paths: Vec<String> = glob(format!("../{}/*.xdr", year).as_str())
+    let paths: Vec<String> = glob(format!("raw/{}/*.xdr", year).as_str())
         .expect("couldn't find datasets")
         .map(|x| x.unwrap().display().to_string())
         .collect();

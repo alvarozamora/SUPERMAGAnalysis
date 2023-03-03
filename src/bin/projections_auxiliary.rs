@@ -11,25 +11,16 @@ fn main() {
     // Define stationarity time, Coherence time
     const STATIONARITY_TIME: Stationarity = Stationarity::Yearly;
 
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(16)
-        .build_global()
-        .unwrap();
-
-    // Which subset of the data to use
-    let days_to_use = DATA_DAYS;
-
     // Start Balancer
-    let mut balancer = Balancer::new(16, 1);
+    let mut balancer = Balancer::new(12, 1);
 
     // Initialize Theory
-    let theory = DarkPhoton::initialize(1.0);
+    let theory = DarkPhoton::new();
 
     // Compute weights for this coherence time
     let complete_series_fut = Analysis::calculate_projections_and_auxiliary(
         STATIONARITY_TIME,
         theory,
-        Some(days_to_use),
         &mut balancer.manager,
     );
     balancer
