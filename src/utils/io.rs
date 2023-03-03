@@ -1,11 +1,11 @@
 use std::{error::Error, path::Path};
 
-use rocksdb::{DBWithThreadMode, MultiThreaded as Parallel};
+use rocksdb::{DBWithThreadMode, MultiThreaded};
 
 use crate::theory::dark_photon::InnerVarChunkWindowMap;
 
 pub struct DiskDB {
-    db: DBWithThreadMode<Parallel>,
+    db: DBWithThreadMode<MultiThreaded>,
 }
 
 pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
@@ -13,7 +13,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
 impl DiskDB {
     pub(crate) fn connect(path: impl AsRef<Path>) -> Result<DiskDB> {
         // Attempt to read existing databse
-        let db = DBWithThreadMode::<Parallel>::open_default(path.as_ref())?;
+        let db = DBWithThreadMode::<MultiThreaded>::open_default(path.as_ref())?;
 
         Ok(DiskDB { db })
     }
@@ -24,7 +24,7 @@ impl DiskDB {
     ) -> Result<Option<InnerVarChunkWindowMap>> {
         match self.db.get(coherence_time.to_le_bytes()) {
             // Map Present
-            Ok(Some(map_bytes)) => Ok(Some(serde_cbor::from_slice(&map_bytes)?)),
+            Ok(Some(map_bytes)) => Ok(Some(bincode::deserialize(&map_bytes)?)),
 
             // Map Not Present
             Ok(None) => Ok(None),
@@ -41,7 +41,7 @@ impl DiskDB {
     ) -> Result<()> {
         Ok(self
             .db
-            .put(coherence_time.to_le_bytes(), serde_cbor::to_vec(map)?)?)
+            .put(coherence_time.to_le_bytes(), bincode::serialize(map)?)?)
     }
 }
 

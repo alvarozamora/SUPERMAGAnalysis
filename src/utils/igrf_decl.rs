@@ -233,7 +233,8 @@ fn test_declination_interpolation() {
 const LOWER_BOUND: usize = 0;
 const LOWER_INNER_BOUND: usize = convert_entry_year_to_sec(1998);
 const UPPER_INNER_BOUND: usize = convert_entry_year_to_sec(2020);
-const UPPER_BOUND: usize = day_since_first(364, 2020) * SECONDS_PER_DAY + SECONDS_PER_DAY - 1;
+/// NOTE: 2020 is a leap year, and index starts at zero
+const UPPER_BOUND: usize = day_since_first(365, 2020) * SECONDS_PER_DAY + SECONDS_PER_DAY - 1;
 
 pub(crate) fn shift_point(sec: usize) -> Result<f64, OOB> {
     // we get lower bound for free because of unsigned int but it's ok

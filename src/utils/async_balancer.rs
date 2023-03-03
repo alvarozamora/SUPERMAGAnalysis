@@ -1,10 +1,13 @@
 use futures::prelude::*;
-use mpi::environment::Universe;
-use mpi::topology::{Communicator, SystemCommunicator};
-use mpi::traits::*;
+
+#[cfg(feature = "multinode")]
+use mpi::{
+    environment::Universe,
+    topology::{Communicator, SystemCommunicator},
+    traits::*,
+};
 use std::pin::Pin;
 use tokio::runtime::Runtime;
-use tokio::task::spawn;
 
 /// This struct helps manage compute on a given node and across nodes
 pub struct Balancer<T = ()> {
@@ -13,7 +16,9 @@ pub struct Balancer<T = ()> {
 }
 
 pub struct Manager<T> {
+    #[cfg(feature = "multinode")]
     pub universe: Universe,
+    #[cfg(feature = "multinode")]
     pub world: SystemCommunicator,
     pub workers: usize,
     pub rank: usize,
@@ -28,14 +33,16 @@ impl<T> Balancer<T> {
     /// Constructs a new `Balancer` after initializing mpi.
     pub fn new(parallel_async_tasks: usize, buffer: usize) -> Self {
         // Initialize mpi
+        #[cfg(feature = "multinode")]
         let universe = mpi::initialize().expect("Failed to initialize mpi");
+        #[cfg(feature = "multinode")]
         let world = universe.world();
 
         // This is the maximum number of `JoinHandle`s allowed.
         // Set equal to available_parallelism minus reduce (user input)
-        let max_available_threads = std::thread::available_parallelism()
-            .expect("failed to retrieve number of threads on this system")
-            .get();
+        // let max_available_threads = std::thread::available_parallelism()
+        //     .expect("failed to retrieve number of threads on this system")
+        //     .get();
         let workers: usize = parallel_async_tasks;
         // if parallel_async_tasks > max_available_threads {
         //     println!("parallel_async_tasks provided ({parallel_async_tasks}) exceeds max_available_threads {max_available_threads}");
@@ -54,8 +61,15 @@ impl<T> Balancer<T> {
             .unwrap();
 
         // This is the node id and total number of nodes
+        #[cfg(feature = "multinode")]
         let rank: usize = world.rank() as usize;
+        #[cfg(feature = "multinode")]
         let size: usize = world.size() as usize;
+
+        #[cfg(not(feature = "multinode"))]
+        let rank: usize = 0;
+        #[cfg(not(feature = "multinode"))]
+        let size: usize = 1;
 
         if rank == 0 {
             println!("--------- Balancer Activated ---------");
@@ -66,7 +80,9 @@ impl<T> Balancer<T> {
 
         Balancer {
             manager: Manager {
+                #[cfg(feature = "multinode")]
                 universe,
+                #[cfg(feature = "multinode")]
                 world,
                 workers,
                 rank,
@@ -132,6 +148,7 @@ impl<T> Manager<T> {
     /// manager.barrier();
     /// ```
     /// [`buffer_await`]: #method.buffer_await
+    #[cfg(feature = "multinode")]
     pub fn barrier(&self) {
         self.world.barrier();
     }
