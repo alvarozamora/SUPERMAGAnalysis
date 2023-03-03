@@ -17,7 +17,6 @@ use special::Gamma;
 use sphrs::{ComplexSHType, Coordinates as SphrsCoordinates, SHEval};
 use std::collections::HashSet;
 use std::fmt::Debug;
-use std::ops::Range;
 use std::sync::Arc;
 
 const NULL: f32 = 0.0;
@@ -50,7 +49,7 @@ pub trait FromChunkMap: Sized {
     ) -> Self;
 }
 
-pub trait Theory: Send + Debug {
+pub trait Theory: Send {
     // const MODES: Modes;
     const NONZERO_ELEMENTS: usize;
     const MIN_STATIONS: usize;
@@ -59,9 +58,9 @@ pub trait Theory: Send + Debug {
     type AuxiliaryValue: Serialize + DeserializeOwned + Send + Sync + FromChunkMap;
 
     // Theory Average and Variance (Noise Spectra)
-    type Mu: Serialize + DeserializeOwned + Send + Sync;
-    type Var: Serialize + DeserializeOwned + Send + Sync;
-    type DataVector: Send + Sync;
+    // type Mu: Serialize + DeserializeOwned + Send + Sync;
+    // type Var: Serialize + DeserializeOwned + Send + Sync;
+    // type DataVector: Send + Sync;
 
     /// Gets nonzero elements for the theory.
     fn get_nonzero_elements() -> HashSet<NonzeroElement>;
@@ -88,44 +87,43 @@ pub trait Theory: Send + Debug {
         chunk_dataset: &DashMap<StationName, Dataset>,
     ) -> Self::AuxiliaryValue;
 
+    // Checks auxiliary values for nans. Returns true if there are no nans
+    fn check_aux_for_nan(auxiliary_values: &Self::AuxiliaryValue) -> bool;
+
     /// Finds X(k) for the relevant frequencies for a given coherence time.
     /// For the dark photon, those are given by triplets, which are presently hard coded.
     fn calculate_data_vector(
         &self,
         projections_complete: &ProjectionsComplete,
         local_set: &Vec<(usize, FrequencyBin)>,
-    ) -> Self::DataVector;
+    );
 
     /// Calculate mu for the theory. The first key in the map should be the coherence time, and the second key should be which chunk the mean is for.
-    fn calculate_mean_theory(
+    fn calculate_theory_mean(
         &self,
         local_set: &Vec<(usize, FrequencyBin)>,
         len_data: usize,
         coherence_times: usize,
         auxiliary_values: Arc<Self::AuxiliaryValue>,
-    ) -> DashMap<usize, DashMap<usize, Self::Mu>>;
+    );
 
     /// Calculate the noise spectra for the theory for the different coherence times.
     /// The first key in the map should be the coherence time, and the second key should be which chunk the mean is for.
-    fn calculate_var_theory(
+    fn calculate_theory_var(
         &self,
         local_set: &Vec<(usize, FrequencyBin)>,
         projections_complete: &ProjectionsComplete,
         coherence_times: usize,
-        days: Range<usize>,
         stationarity: Stationarity,
         auxiliary_values: Arc<Self::AuxiliaryValue>,
-    ) -> Result<DiskDB>;
+    );
 
     /// Calculate the likelihood
     fn calculate_likelihood(
         &self,
         local_set: &Vec<(usize, FrequencyBin)>,
         projections_complete: &ProjectionsComplete,
-        data_vector: &Self::DataVector,
-        theory_mean: &DashMap<usize, DashMap<usize, Self::Mu>>,
         coherence_times: usize,
-        days: Range<usize>,
         stationarity: Stationarity,
     ) -> Vec<(f32, f32)>;
 }
