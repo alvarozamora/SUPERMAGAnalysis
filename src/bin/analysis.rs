@@ -2,7 +2,7 @@ use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
-use supermag_analysis::theory::dark_photon::DarkPhoton;
+use supermag_analysis::theory::dark_photon::{read_dark_photon_projections_auxiliary, DarkPhoton};
 use supermag_analysis::theory::Theory;
 use supermag_analysis::utils::async_balancer::Balancer;
 use supermag_analysis::weights::{Analysis, ProjectionsComplete, Stationarity};
@@ -63,40 +63,4 @@ fn main() {
         &mut balancer.manager,
     )
     .expect("failed to run analysis");
-}
-
-fn read_dark_photon_projections_auxiliary() -> Result<
-    (
-        Arc<ProjectionsComplete>,
-        Arc<<DarkPhoton as Theory>::AuxiliaryValue>,
-    ),
-    Box<dyn std::error::Error>,
-> {
-    // Open projections_complete and auxiliary_complete file
-    let mut projections_file = File::open("projections_complete").expect("failed to open file");
-    let mut auxiliary_file = File::open("auxiliary_complete").expect("failed to open file");
-
-    // Initialize buffer for projections and auxiliary values
-    let mut projection_buffer = Vec::new();
-    let mut auxiliary_buffer = Vec::new();
-
-    // Read bytes in files
-    projections_file
-        .read_to_end(&mut projection_buffer)
-        .expect("failed to read projections");
-    auxiliary_file
-        .read_to_end(&mut auxiliary_buffer)
-        .expect("failed to read auxiliary");
-
-    // Deserialize bytes into respective types
-    let projections_complete: Arc<ProjectionsComplete> = Arc::new(
-        bincode::deserialize(&projection_buffer)
-            .expect("failed to deserialize projections_complete"),
-    );
-    let auxiliary_complete: Arc<<DarkPhoton as Theory>::AuxiliaryValue> = Arc::new(
-        bincode::deserialize(&auxiliary_buffer)
-            .expect("failed to deserialize projections_complete"),
-    );
-
-    Ok((projections_complete, auxiliary_complete))
 }

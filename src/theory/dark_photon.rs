@@ -1,5 +1,5 @@
 use super::*;
-use std::{collections::HashMap, io::Write, sync::atomic::AtomicUsize, ops::AddAssign};
+use std::{collections::HashMap, io::{Write, Read}, sync::atomic::AtomicUsize, ops::AddAssign};
 use crossbeam_channel::{bounded, unbounded};
 use dashmap::{DashMap};
 use interp1d::Interp1d;
@@ -2001,6 +2001,42 @@ fn optimize<F: Fn(f64) -> std::result::Result<f64, BoundError>>(function: F, inp
         }
     }
     Ok(num_steps)
+}
+
+pub fn read_dark_photon_projections_auxiliary() -> Result<
+    (
+        Arc<ProjectionsComplete>,
+        Arc<<DarkPhoton as Theory>::AuxiliaryValue>,
+    ),
+    Box<dyn std::error::Error>,
+> {
+    // Open projections_complete and auxiliary_complete file
+    let mut projections_file = std::fs::File::open("projections_complete").expect("failed to open file");
+    let mut auxiliary_file = std::fs::File::open("auxiliary_complete").expect("failed to open file");
+
+    // Initialize buffer for projections and auxiliary values
+    let mut projection_buffer = Vec::new();
+    let mut auxiliary_buffer = Vec::new();
+
+    // Read bytes in files
+    projections_file
+        .read_to_end(&mut projection_buffer)
+        .expect("failed to read projections");
+    auxiliary_file
+        .read_to_end(&mut auxiliary_buffer)
+        .expect("failed to read auxiliary");
+
+    // Deserialize bytes into respective types
+    let projections_complete: Arc<ProjectionsComplete> = Arc::new(
+        bincode::deserialize(&projection_buffer)
+            .expect("failed to deserialize projections_complete"),
+    );
+    let auxiliary_complete: Arc<<DarkPhoton as Theory>::AuxiliaryValue> = Arc::new(
+        bincode::deserialize(&auxiliary_buffer)
+            .expect("failed to deserialize projections_complete"),
+    );
+
+    Ok((projections_complete, auxiliary_complete))
 }
 
 
