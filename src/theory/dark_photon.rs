@@ -1,11 +1,10 @@
 use super::*;
-use std::{collections::HashMap, io::Write, ops::Bound};
+use std::{collections::HashMap, io::Write, sync::atomic::AtomicUsize, ops::AddAssign};
 use crossbeam_channel::{bounded, unbounded};
-use dashmap::{DashMap, DashSet};
+use dashmap::{DashMap};
 use interp1d::Interp1d;
 use itertools::Itertools;
-use parking_lot::RwLock;
-use rocksdb::{DBWithThreadMode, SingleThreaded};
+use rocksdb::{DBWithThreadMode, SingleThreaded, MultiThreaded};
 use rustfft::FftPlanner;
 use serde_derive::{Serialize, Deserialize};
 use tokio::sync::Semaphore;
@@ -13,14 +12,14 @@ use std::sync::Arc;
 use crate::{
     utils::{
     loader::Dataset,
-    approximate_sidereal, coordinates::Coordinates, fft::get_frequency_range_1s, svd::compact_svd,
+    approximate_sidereal, coordinates::Coordinates, fft::get_frequency_range_1s, svd::compact_svd, sec_to_year,
     },
     constants::SIDEREAL_DAY_SECONDS,
 };
 use std::{
     ops::{Mul, Div, Add, Range, Sub},
 };
-use ndrustfft::{FftHandler, ndfft_par};
+use ndrustfft::{FftHandler, ndfft_par, Zero};
 use rayon::prelude::*;
 use ndarray::{s, ScalarOperand, Array2, Axis};
 use num_traits::{ToPrimitive, Float, Num};
@@ -37,31 +36,23 @@ const ONE: Complex<f32> = Complex::new(1.0, 0.0);
 /// Size of chunks (used for noise spectra ffts)
 const TAU: usize = 16384 * 64;
 
-type CoherenceTime = usize;
-type Window = usize;
 type Chunk = usize;
-pub type InnerVarChunkWindowMap = DashMap<Window, Triplet>;
+type Window = usize;
+pub type InnerVarChunkWindowMap = DashMap<(Chunk, Window), Triplet>;
 pub type InnerAChunkWindowMap = DashMap<Window, DashMap<Triplet, (Array2<Complex<f32>>,  Array2<Complex<f32>>)>>;
 
 
 type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
 
-// TODO: Why is DP/Theory clone?
 #[derive(Clone)]
 pub struct DarkPhoton {
-    vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>>,
+    pub vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>>,
     // The RwLock guarantees only one thread is every modifying the database, making SingleThreaded safe
-    data_vector: Arc<DBWithThreadMode<SingleThreaded>>,
-    theory_mean: Arc<DBWithThreadMode<SingleThreaded>>,
-    theory_var: Arc<DiskDB>,
+    pub data_vector: Arc<DBWithThreadMode<SingleThreaded>>,
+    pub theory_mean: Arc<DBWithThreadMode<SingleThreaded>>,
+    pub theory_var: Arc<DiskDB>,
 }
 
-
-// impl Debug for DarkPhoton {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         Ok(())
-//     }
-// }
 
 lazy_static! {
     static ref DARK_PHOTON_MODES: Vec<Mode> = vec![
@@ -70,30 +61,30 @@ lazy_static! {
         Mode(1,  1),
     ];
 
-    static ref DARK_PHOTON_NONZERO_ELEMENTS: Vec<NonzeroElement> = vec![
+    pub static ref DARK_PHOTON_NONZERO_ELEMENTS: Vec<NonzeroElement> = vec![
+        // "X1",
         NonzeroElement {
             index: 1,
-            name: Some(String::from("X1")),
             assc_mode: (Mode(1, -1), Component::PolarReal)
         },
+        // "X2"
         NonzeroElement {
             index: 2,
-            name: Some(String::from("X2")),
             assc_mode: (Mode(1, -1), Component::PolarImag)
         },
+        // X3
         NonzeroElement {
             index: 3,
-            name: Some(String::from("X3")),
             assc_mode: (Mode(1, -1), Component::AzimuthReal)
         },
+        // X4
         NonzeroElement {
             index: 4,
-            name: Some(String::from("X4")),
             assc_mode: (Mode(1, -1), Component::AzimuthImag)
         },
+        // X5
         NonzeroElement {
             index: 5,
-            name: Some(String::from("X5")),
             assc_mode: (Mode(1,  0), Component::AzimuthReal)
         },
     ];
@@ -168,11 +159,11 @@ impl Theory for DarkPhoton {
 
         let mut nonzero_elements = HashSet::new();
 
-        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[0].clone());
-        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[1].clone());
-        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[2].clone());
-        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[3].clone());
-        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[4].clone());
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[0]);
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[1]);
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[2]);
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[3]);
+        nonzero_elements.insert(DARK_PHOTON_NONZERO_ELEMENTS[4]);
 
         nonzero_elements
     }
@@ -207,7 +198,7 @@ impl Theory for DarkPhoton {
                     let station_name = key_value.key();
                     let dataset = chunk_dataset.get(station_name).unwrap();
 
-                    log::trace!("calculating {} projections for {station_name} on index {}", nonzero_element.name.as_ref().unwrap(), dataset.index);
+                    log::trace!("calculating projections X{} for {station_name} on index {}", nonzero_element.index, dataset.index);
 
                     // Get product of relevant component of vector spherical harmonics and of the magnetic field.
                     let relevant_product = match nonzero_element.assc_mode {
@@ -265,9 +256,10 @@ impl Theory for DarkPhoton {
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
         _chunk_dataset: &DashMap<StationName, Dataset>,
+        valid_entry_map: &DashMap<StationName, Array1<bool>>,
     ) -> Self::AuxiliaryValue {
         DarkPhotonAuxiliary {
-            h: dark_photon_auxiliary_values(weights_n, weights_e, weights_wn, weights_we),
+            h: dark_photon_auxiliary_values(weights_n, weights_e, weights_wn, weights_we, valid_entry_map),
         }
     }
 
@@ -281,17 +273,17 @@ impl Theory for DarkPhoton {
         projections_complete: &ProjectionsComplete,
         local_set: &Vec<(usize, FrequencyBin)>,
     ) {
-
-        // This holds all (15 x 1) data vectors
-        // let data_vector_dashmap = DashMap::with_capacity_and_shard_amount(local_set.len().next_power_of_two() * 4, 128);
-        
+        // Clear database
+        self.data_vector.iterator(rocksdb::IteratorMode::Start).map(|x| x.unwrap()).par_bridge().for_each(|(key, _)| {
+            drop(self.data_vector.delete(key));
+        });
 
         // Local references
-        let dp1 = DARK_PHOTON_NONZERO_ELEMENTS[0].clone();
-        let dp2 = DARK_PHOTON_NONZERO_ELEMENTS[1].clone();
-        let dp3 = DARK_PHOTON_NONZERO_ELEMENTS[2].clone();
-        let dp4 = DARK_PHOTON_NONZERO_ELEMENTS[3].clone();
-        let dp5 = DARK_PHOTON_NONZERO_ELEMENTS[4].clone();
+        let dp1 = &DARK_PHOTON_NONZERO_ELEMENTS[0];
+        let dp2 = &DARK_PHOTON_NONZERO_ELEMENTS[1];
+        let dp3 = &DARK_PHOTON_NONZERO_ELEMENTS[2];
+        let dp4 = &DARK_PHOTON_NONZERO_ELEMENTS[3];
+        let dp5 = &DARK_PHOTON_NONZERO_ELEMENTS[4];
 
         // KeySet
         let keyset = DashMap::new(); 
@@ -316,44 +308,44 @@ impl Theory for DarkPhoton {
                 file.write(format!("{chunk_index} {window_index}\n").as_bytes()).unwrap();
             }
         });
-        
-        local_set
-            .iter()
-            .for_each(|(coherence_time /* usize */, frequency_bin /* FrequencyBin */)| {
 
+        local_set
+            .par_iter()
+            .for_each(|(coherence_time /* usize */, frequency_bin /* FrequencyBin */)| {
 
                 let series_pb = multi.add(ProgressBar::new(5));
                 series_pb.set_style(sty.clone());
                 series_pb.set_message("projection element X_i");
                 series_pb.inc(0);
 
+                // Calculate number of exact chunks, and the total size of all exact chunks
+                let exact_chunks: usize = projections_complete.num_secs() / coherence_time;
+                let exact_chunks_size: usize = exact_chunks * coherence_time;
+                let last_chunk_size = projections_complete.num_secs() % exact_chunks_size;
+                let total_chunks = exact_chunks + if last_chunk_size > 0 { 1 } else { 0 };
+                log::info!("data vector: {coherence_time} has {total_chunks} chunks");
+
                 // Parallelize over all nonzero elements in the theory
                 projections_complete
                     .projections_complete
-                    // .par_iter()
-                    // .for_each_with(&data_vector_dashmap, |data_vector_map, series| {
                     .iter()
                     .for_each(|series| {
-                        // let data_vector_map = &data_vector_dashmap;
 
-                        
                         // Unpack element, series
                         let (element, series) = series.pair();
 
-                        // Calculate number of exact chunks, and the total size of all exact chunks
-                        let exact_chunks: usize = series.len() / coherence_time;
-                        let exact_chunks_size: usize = exact_chunks * coherence_time;
-                        let last_chunk_size = series.len() % exact_chunks_size;
-                        let total_chunks = exact_chunks + if last_chunk_size > 0 { 1 } else { 0 };
-
                         // Chunk series
+                        log::trace!("constructing 2d series");
                         let mut two_dim_series: Array2<Complex<f32>> = series
                             .slice(s!(0..exact_chunks_size))
-                            .into_shape((*coherence_time, exact_chunks))
+                            .into_shape((exact_chunks, *coherence_time))
                             .expect("This shouldn't fail ever. If anything we should get an early panic from .slice()")
-                            .map(|x| x.into());
+                            .map(|x| x.into())
+                            .t()
+                            .to_owned();
                         
-                        if last_chunk_size > 0 {
+                            log::trace!("appending padded chunk");
+                            if last_chunk_size > 0 {
                             let mut last_chunk_pad = Array1::<Complex<f32>>::zeros(*coherence_time);
                             last_chunk_pad
                                 .slice_mut(s![0..last_chunk_size])
@@ -367,12 +359,18 @@ impl Theory for DarkPhoton {
 
                         // Do ffts
                         let num_fft_elements = *coherence_time;
-                        let mut fft_handler = FftHandler::<f32>::new(*coherence_time);
                         let permit = fft_semaphore.acquire();
-                        let mut fft_result = ndarray::Array2::<Complex<f32>>::zeros((num_fft_elements, total_chunks));
-                        ndfft_par(&two_dim_series, &mut fft_result, &mut fft_handler, 0);
-                        drop(two_dim_series); // to save memory
-                        drop(fft_handler);
+                        // let mut fft_handler = FftHandler::<f32>::new(*coherence_time);
+                        // let mut fft_result = ndarray::Array2::<Complex<f32>>::zeros((num_fft_elements, total_chunks));
+                        // ndfft_par(&two_dim_series, &mut fft_result, &mut fft_handler, 0);
+                        let mut planner = FftPlanner::new();
+                        log::trace!("performing ffts");
+                        for mut column in two_dim_series.columns_mut() {
+                            let fft_handler = planner.plan_fft_forward(*coherence_time);
+                            fft_handler.process(column.as_slice_mut().unwrap());
+                        }
+                        let mut fft_result = two_dim_series;
+
 
                         // Get values at relevant frequencies
                         let approx_sidereal: usize = approximate_sidereal(frequency_bin);
@@ -385,16 +383,16 @@ impl Theory for DarkPhoton {
                         let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
                         let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
                         let relevant_range = start_relevant..=end_relevant;
-                        // log::debug!("relevant_range is {start_relevant}..={end_relevant}");
-                        // let relevant_values = fft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range));
-                        // Overwrite to save memory!
-                        fft_result = fft_result.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range)).to_owned();
+                        // Reduce to save memory!
+                        fft_result.slice_axis_inplace(ndarray::Axis(0), ndarray::Slice::from(relevant_range));//.slice_axis(ndarray::Axis(0), ndarray::Slice::from(relevant_range)).to_owned();
                         drop(permit);
                         
-                        let num_windows = (fft_result.shape()[0] - (2*approx_sidereal + 1)) as u64;
+                        let num_windows = (fft_result.shape()[0] - (2*approx_sidereal + 1) + 1) as u64;
                         let window_pb = multi.add(ProgressBar::new(num_windows));
                         window_pb.set_style(sty.clone());
                         window_pb.set_message("windows");
+                        log::info!("data vector: {coherence_time} has {num_windows} windows");
+
 
                         fft_result
                             .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
@@ -411,12 +409,9 @@ impl Theory for DarkPhoton {
                                 assert_eq!(mid.shape(), &[total_chunks]);
                                 assert_eq!(high.shape(), &[total_chunks]);
 
-                                (0..low.len())
+                                (0..total_chunks)
                                     .into_par_iter()
-                                    // .for_each_with(&data_vector_map, |map, chunk_index| {
-                                    // .into_iter()
                                     .for_each(|chunk_index| {
-                                        // let map = &data_vector_map;
 
                                         tx.send((chunk_index, window_index)).unwrap();
 
@@ -425,51 +420,63 @@ impl Theory for DarkPhoton {
                                         let key = [*coherence_time, chunk_index, window_index].map(usize::to_le_bytes).concat();
                                         keyset.insert(key.clone(), ());
 
-                                        // From here until the key is dropped there
-                                        // exists only one threaad which will load/modify/store this key/value
+                                        // From here until the key is dropped there exists only one thread
+                                        // which will load/modify/store this key/value
                                         let key_lock = keyset.get_mut(&key);
 
                                         // Try to get element
                                         let entry: Option<Vec<u8>> = self.data_vector.get(&key).expect("rocksdb failure");
-                                        
+
                                         self.data_vector.put(&key, entry.map_or_else(
                                             // Create data vector element if it doesn't exist
                                             || {
                                                 // Initialize with zeros and metadata
                                                 let mut inner_data_vector = DarkPhotonVec {
-                                                    low: [0.0.into(); 5].into_iter().collect(),
-                                                    mid: [0.0.into(); 5].into_iter().collect(),
-                                                    high: [0.0.into(); 5].into_iter().collect(),
-                                                    // coh_time: *coherence_time,
-                                                    // window: window_index,
-                                                    // chunk: chunk_index,
+                                                    low: Array1::<Complex<f32>>::zeros(5),
+                                                    mid: Array1::<Complex<f32>>::zeros(5),
+                                                    high: Array1::<Complex<f32>>::zeros(5),
                                                 };
 
                                                 match element {
-                                                    e if e == &dp1 => {
-                                                        inner_data_vector.low[0] += low[chunk_index];
-                                                        inner_data_vector.mid[0] += mid[chunk_index];
-                                                        inner_data_vector.high[0] += high[chunk_index];
+                                                    e if e == dp1 => {
+                                                        assert!(inner_data_vector.low[0].is_zero());
+                                                        assert!(inner_data_vector.mid[0].is_zero());
+                                                        assert!(inner_data_vector.high[0].is_zero());
+                                                        inner_data_vector.low[0] = low[chunk_index];
+                                                        inner_data_vector.mid[0] = mid[chunk_index];
+                                                        inner_data_vector.high[0] = high[chunk_index];
                                                     },
-                                                    e if e == &dp2 => {
-                                                        inner_data_vector.low[1] += low[chunk_index];
-                                                        inner_data_vector.mid[1] += mid[chunk_index];
-                                                        inner_data_vector.high[1] += high[chunk_index];
+                                                    e if e == dp2 => {
+                                                        assert!(inner_data_vector.low[1].is_zero());
+                                                        assert!(inner_data_vector.mid[1].is_zero());
+                                                        assert!(inner_data_vector.high[1].is_zero());
+                                                        inner_data_vector.low[1] = low[chunk_index];
+                                                        inner_data_vector.mid[1] = mid[chunk_index];
+                                                        inner_data_vector.high[1] = high[chunk_index];
                                                     },
-                                                    e if e == &dp3 => {
-                                                        inner_data_vector.low[2] += low[chunk_index];
-                                                        inner_data_vector.mid[2] += mid[chunk_index];
-                                                        inner_data_vector.high[2] += high[chunk_index];
+                                                    e if e == dp3 => {
+                                                        assert!(inner_data_vector.low[2].is_zero());
+                                                        assert!(inner_data_vector.mid[2].is_zero());
+                                                        assert!(inner_data_vector.high[2].is_zero());
+                                                        inner_data_vector.low[2] = low[chunk_index];
+                                                        inner_data_vector.mid[2] = mid[chunk_index];
+                                                        inner_data_vector.high[2] = high[chunk_index];
                                                     },
-                                                    e if e == &dp4 => {
-                                                        inner_data_vector.low[3] += low[chunk_index];
-                                                        inner_data_vector.mid[3] += mid[chunk_index];
-                                                        inner_data_vector.high[3] += high[chunk_index];
+                                                    e if e == dp4 => {
+                                                        assert!(inner_data_vector.low[3].is_zero());
+                                                        assert!(inner_data_vector.mid[3].is_zero());
+                                                        assert!(inner_data_vector.high[3].is_zero());
+                                                        inner_data_vector.low[3] = low[chunk_index];
+                                                        inner_data_vector.mid[3] = mid[chunk_index];
+                                                        inner_data_vector.high[3] = high[chunk_index];
                                                     },
-                                                    e if e == &dp5 => {
-                                                        inner_data_vector.low[4] += low[chunk_index];
-                                                        inner_data_vector.mid[4] += mid[chunk_index];
-                                                        inner_data_vector.high[4] += high[chunk_index];
+                                                    e if e == dp5 => {
+                                                        assert!(inner_data_vector.low[4].is_zero());
+                                                        assert!(inner_data_vector.mid[4].is_zero());
+                                                        assert!(inner_data_vector.high[4].is_zero());
+                                                        inner_data_vector.low[4] = low[chunk_index];
+                                                        inner_data_vector.mid[4] = mid[chunk_index];
+                                                        inner_data_vector.high[4] = high[chunk_index];
                                                     },
                                                     _ => unreachable!("dark photon only has these 5 nonzero elements"),
                                                 };
@@ -479,30 +486,45 @@ impl Theory for DarkPhoton {
                                             },|inner_data_vector_bytes: Vec<u8>| {
                                                 let mut inner_data_vector: DarkPhotonVec<f32> = bincode::deserialize(&inner_data_vector_bytes).unwrap();
                                                 match element {
-                                                    e if e == &dp1 => {
-                                                        inner_data_vector.low[0] += low[chunk_index];
-                                                        inner_data_vector.mid[0] += mid[chunk_index];
-                                                        inner_data_vector.high[0] += high[chunk_index];
+                                                    e if e == dp1 => {
+                                                        assert!(inner_data_vector.low[0].is_zero());
+                                                        assert!(inner_data_vector.mid[0].is_zero());
+                                                        assert!(inner_data_vector.high[0].is_zero());
+                                                        inner_data_vector.low[0] = low[chunk_index];
+                                                        inner_data_vector.mid[0] = mid[chunk_index];
+                                                        inner_data_vector.high[0] = high[chunk_index];
                                                     },
-                                                    e if e == &dp2 => {
-                                                        inner_data_vector.low[1] += low[chunk_index];
-                                                        inner_data_vector.mid[1] += mid[chunk_index];
-                                                        inner_data_vector.high[1] += high[chunk_index];
+                                                    e if e == dp2 => {
+                                                        assert!(inner_data_vector.low[1].is_zero());
+                                                        assert!(inner_data_vector.mid[1].is_zero());
+                                                        assert!(inner_data_vector.high[1].is_zero());
+                                                        inner_data_vector.low[1] = low[chunk_index];
+                                                        inner_data_vector.mid[1] = mid[chunk_index];
+                                                        inner_data_vector.high[1] = high[chunk_index];
                                                     },
-                                                    e if e == &dp3 => {
-                                                        inner_data_vector.low[2] += low[chunk_index];
-                                                        inner_data_vector.mid[2] += mid[chunk_index];
-                                                        inner_data_vector.high[2] += high[chunk_index];
+                                                    e if e == dp3 => {
+                                                        assert!(inner_data_vector.low[2].is_zero());
+                                                        assert!(inner_data_vector.mid[2].is_zero());
+                                                        assert!(inner_data_vector.high[2].is_zero());
+                                                        inner_data_vector.low[2] = low[chunk_index];
+                                                        inner_data_vector.mid[2] = mid[chunk_index];
+                                                        inner_data_vector.high[2] = high[chunk_index];
                                                     },
-                                                    e if e == &dp4 => {
-                                                        inner_data_vector.low[3] += low[chunk_index];
-                                                        inner_data_vector.mid[3] += mid[chunk_index];
-                                                        inner_data_vector.high[3] += high[chunk_index];
+                                                    e if e == dp4 => {
+                                                        assert!(inner_data_vector.low[3].is_zero());
+                                                        assert!(inner_data_vector.mid[3].is_zero());
+                                                        assert!(inner_data_vector.high[3].is_zero());
+                                                        inner_data_vector.low[3] = low[chunk_index];
+                                                        inner_data_vector.mid[3] = mid[chunk_index];
+                                                        inner_data_vector.high[3] = high[chunk_index];
                                                     },
-                                                    e if e == &dp5 => {
-                                                        inner_data_vector.low[4] += low[chunk_index];
-                                                        inner_data_vector.mid[4] += mid[chunk_index];
-                                                        inner_data_vector.high[4] += high[chunk_index];
+                                                    e if e == dp5 => {
+                                                        assert!(inner_data_vector.low[4].is_zero());
+                                                        assert!(inner_data_vector.mid[4].is_zero());
+                                                        assert!(inner_data_vector.high[4].is_zero());
+                                                        inner_data_vector.low[4] = low[chunk_index];
+                                                        inner_data_vector.mid[4] = mid[chunk_index];
+                                                        inner_data_vector.high[4] = high[chunk_index];
                                                     },
                                                     _ => unreachable!("dark photon only has these 5 nonzero elements"),
                                                 };
@@ -520,6 +542,7 @@ impl Theory for DarkPhoton {
                 series_pb.finish_and_clear();
                 ch_pb.inc(1);
             });
+        ch_pb.finish_and_clear();
 
         drop(tx);
         handle.join().unwrap();
@@ -527,13 +550,11 @@ impl Theory for DarkPhoton {
 
     /// NOTE: this implementation assumes that the time series is fully contiguous (with no null values).
     /// As such, it will produce incorrect results if used with a dataset that contains null values.
-    /// 
-    /// 
     fn calculate_theory_mean(
         &self,
         set: &Vec<(usize, FrequencyBin)>,
         len_data: usize,
-        coherence_times: usize,
+        _coherence_times: usize,
         auxiliary_values: Arc<Self::AuxiliaryValue>,
     ) {
 
@@ -543,10 +564,10 @@ impl Theory for DarkPhoton {
         // Map of Map of mus
         // First key is coherence time
         // Second key is chunk index
-        log::trace!("starting loop for {} coherence times", set.len());
+        log::trace!("theory mean: starting loop for {} coherence times", set.len());
         set
-            .into_iter()
-            // .into_par_iter()
+            // .into_iter()
+            .into_par_iter()
             .for_each(|(coherence_time /* usize */, frequency_bin /* &FrequencyBin */)| {
 
                 // For the processed, cleaned dataset, this is 
@@ -554,6 +575,7 @@ impl Theory for DarkPhoton {
                 let num_chunks = len_data / coherence_time;
                 let last_chunk = len_data % coherence_time > 0;
                 let total_chunks = num_chunks + if last_chunk { 1 } else { 0 };
+                log::info!("theory mean: coherence_time {coherence_time} has {total_chunks} chunks");
                 
                 // TODO: refactor elsewhere to be user input or part of some fit
                 const RHO: f32 = 6.04e7;
@@ -563,14 +585,12 @@ impl Theory for DarkPhoton {
                 // This is the inner chunk map from chunk to coherence time
                 let inner_chunk_map = DashMap::new();
 
-                // for chunk in 0..total_chunks {
                 (0..total_chunks).into_par_iter().for_each(|chunk| {
 
                     // Beginning and end index for this chunk in the total series
                     // NOTE: `end` is exclusive
                     let start: usize  = chunk * coherence_time;
                     let end: usize = ((chunk + 1) * coherence_time).min(len_data);
-                    log::trace!("calculated start and end indices");
 
                     // Calculate cos + isin. Unlike the original implementation, this is done using euler's 
                     // exp(ix) = cos(x) + i sin(x)
@@ -611,7 +631,6 @@ impl Theory for DarkPhoton {
                             }
                         )
                         .mapv(Complex::exp);
-                    log::trace!("calculated cis, which have length {}", cis_fh_f.len());
                     
                     // Get references to auxiliary values for this chunk for better readability
                     let h1 = auxiliary_values.h[0].slice(s![start..end]);
@@ -621,7 +640,6 @@ impl Theory for DarkPhoton {
                     let h5 = auxiliary_values.h[4].slice(s![start..end]);
                     let h6 = auxiliary_values.h[5].slice(s![start..end]);
                     let h7 = auxiliary_values.h[6].slice(s![start..end]);
-                    log::trace!("obtained auxiliary values for chunk {chunk}, which have length {}", h1.len());
 
                     // Start of f = fd-fdhat components
 
@@ -1101,7 +1119,6 @@ impl Theory for DarkPhoton {
                         y: [muy0, muy1, muy2, muy3, muy4, muy5, muy6, muy7, muy8, muy9, muy10, muy11, muy12, muy13, muy14],
                         z: [muz0, muz1, muz2, muz3, muz4, muz5, muz6, muz7, muz8, muz9, muz10, muz11, muz12, muz13, muz14],
                     };
-                    log::trace!("calculated mus for chunk {chunk}");
 
                     // Insert chunk mu into chunk map
                     inner_chunk_map.insert(
@@ -1136,10 +1153,11 @@ impl Theory for DarkPhoton {
         log::info!("Calculating power spectra for stationarity times");
 
         // NOTE: This is hardcoded for stationarity = 1 year
+        // NOTE: These are the ones that 
         (2003..2021).into_iter().for_each(|year| {
 
             // Get stationarity period indices (place within entire SUPERMAG dataset)
-            // NOTE: this definition varies from original implementation. The original
+            // MINOR NOTE: this definition varies from original implementation. The original
             // python implementation defines the `end` index to be the first index of the
             // next chunk, since start:end is not end inclusive. This means the size of 
             // the chunks are (end - start + 1)
@@ -1148,10 +1166,10 @@ impl Theory for DarkPhoton {
             // Now convert these indices to the indices within the subset used
             let secs: Range<usize> = projections_complete.secs();
             let (start_in_series, end_in_series) = (
-                secs.clone().position(|i| i == start_stationarity).unwrap_or(secs.start),
-                secs.clone().position(|i| i == end_stationarity).unwrap_or_else(|| { log::warn!("falling back to final element!"); secs.end-1}),
+                secs.clone().position(|i| i == start_stationarity).unwrap(),//.unwrap_or(secs.start),
+                secs.clone().position(|i| i == end_stationarity).unwrap(),//.unwrap_or_else(|| { log::warn!("falling back to final element!"); secs.end-1}),
             );
-            assert_ne!(start_in_series, end_in_series, "zero size");
+            assert!(start_in_series < end_in_series, "invalid range");
 
             // Get the subseries for this year
             let projections_subset: DashMap<NonzeroElement, Vec<f32>> = projections_complete
@@ -1159,12 +1177,14 @@ impl Theory for DarkPhoton {
                 .map(|kv| {
                     // Get element and the complete longest contiguous series
                     let (element, complete_series) = kv.pair();
-                    // println!("getting yearly subset {}..={} of complete series with length {}", start_in_series, end_in_series, complete_series.len());
                     let pair = (element.clone(), complete_series.slice(s![start_in_series..=end_in_series]).to_vec());
-                    // println!("got yearly subset of complete series");
                     pair
                 }).collect();
-        
+
+            // Set up an fft planner to reuse for all ffts in this year
+            let mut planner = FftPlanner::new();
+            let fft_handler = planner.plan_fft_forward(2*TAU);
+
             // Get chunk indices
             let num_chunks: usize = ((end_in_series - start_in_series + 1) / TAU).max(1);
             let chunk_size: usize = (end_in_series - start_in_series + 1) / num_chunks;
@@ -1177,16 +1197,9 @@ impl Theory for DarkPhoton {
                     let hi = (k + 1) * chunk_size + (k + 1).min(chunk_mod);
                     [lo, hi]
                 }).collect_vec();
-            // dbg!(&stationarity_chunks);
 
-            // Set up an fft planner to reuse for all ffts in this year
-            let mut planner = FftPlanner::new();
-            let fft_handler = planner.plan_fft_forward(2*TAU);
-            let mut scratch = vec![0.0.into(); 2*TAU];
         
-            let mut chunk_collection = Vec::with_capacity(stationarity_chunks.len());
-            for stationarity_chunk in &stationarity_chunks {
-
+            let chunk_collection: Vec<_> = stationarity_chunks.into_par_iter().map(|stationarity_chunk| {
                 // Get the data for this chunk, pad it to have length equal to a power of 2, and take its fft
                 let chunk_ffts: Vec<(NonzeroElement, Power<f32>)> = projections_subset
                     .iter()
@@ -1196,30 +1209,26 @@ impl Theory for DarkPhoton {
                         let (element, year_series) = kv.pair();
 
                         // Get chunk from year
-                        log::trace!("getting chunk from year");
                         let chunk_from_year = &year_series[stationarity_chunk[0]..stationarity_chunk[1]];
-                        log::trace!("got chunk from year");
 
                         // Padded series
                         let chunk_size = stationarity_chunk[1] - stationarity_chunk[0];
                         let mut padded_series = Array1::<Complex<f32>>::zeros(2*TAU);
                         log::trace!(
-                            "size of chunk is {}, being placed in a {} series of zeros",
+                            "theory var: size of chunk is {}, being placed in a {} series of zeros",
                             chunk_size, padded_series.len(),
                         );
 
-                        log::trace!("modifying series");
                         padded_series
                             .slice_mut(s![0..chunk_size])
                             .iter_mut()
                             .zip(chunk_from_year)
                             .for_each(|(ps, s)| { *ps = s.into(); });
-                        log::trace!("modified series");
 
 
                         // FFT of padded series
                         fft_handler
-                            .process_with_scratch(padded_series.as_slice_mut().expect("should be in contiguous order"), &mut scratch);
+                            .process(padded_series.as_slice_mut().expect("should be in contiguous order"));
 
                         // Package power with metadata
                         let power = Power {
@@ -1249,15 +1258,15 @@ impl Theory for DarkPhoton {
                     }
                 }
 
-                chunk_collection.push(chunk_ffts_squared);
-            }
+                chunk_ffts_squared
+            }).collect();
 
             // Take the average. 
             // First, initialize zero arrays 
             let avg_power: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DARK_PHOTON_NONZERO_ELEMENTS
                 .iter()
                 .cartesian_product(DARK_PHOTON_NONZERO_ELEMENTS.iter())
-                .map(|(e1, e2)| ((e1.clone(), e2.clone()), Power { power: Array1::zeros(2*TAU), start_sec: start_in_series, end_sec: end_in_series }))
+                .map(|(e1, e2)| ((*e1, *e2), Power { power: Array1::zeros(2*TAU), start_sec: start_in_series, end_sec: end_in_series }))
                 .collect();
             // Then, sum (get denominator before consuming iterator)
             let denominator = chunk_collection.len() as f32;
@@ -1278,14 +1287,11 @@ impl Theory for DarkPhoton {
             avg_power
                 .iter_mut()
                 .for_each(|mut kv| kv.value_mut().div_assign_scalar(denominator * ONE));
-
             
             // Add along with the rest of the stationarity times
             spectra.insert(year, avg_power);
-            // log::info!("Finished calculating power for stationarity_time {year}");
             initial_spectra_pb.inc(1)
         });
-
 
         // Initialize progress bar
         let interpolators_pb = ProgressBar::new(spectra.len() as u64);
@@ -1331,11 +1337,11 @@ impl Theory for DarkPhoton {
                 let num_chunks = len_data / coherence_time;
                 let last_chunk: bool = len_data % coherence_time > 0;
                 let total_chunks = num_chunks + if last_chunk { 1 } else { 0 };
+                log::info!("theory var: coherence_time {coherence_time} has {total_chunks} chunks");
                 
                 // This is the inner chunk map from chunk to coherence time
                 // let inner_chunk_map: DashMap<(NonzeroElement, NonzeroElement), DashMap<usize, Triplet<f32>>> = DashMap::new();
-                // NOTE: work in progress: restructuring to get the 5x5 2d arrays contiuous in memory
-                let inner_chunk_map: InnerVarChunkWindowMap = DashMap::new();
+                let inner_chunk_window_map: InnerVarChunkWindowMap = DashMap::new();
 
                 (0..total_chunks)
                     .into_par_iter()
@@ -1343,9 +1349,9 @@ impl Theory for DarkPhoton {
 
                     // Beginning and end index for this chunk in the total series
                     let chunk_start: usize  = chunk * coherence_time;
-                    let chunk_end_exclusive: usize = ((chunk + 1) * coherence_time)
-                        .min(len_data);
-                    log::trace!("calculated start and end indices");
+                    let chunk_end_exclusive: usize = (chunk + 1) * coherence_time;
+
+                    let overlap_counter = AtomicUsize::new(0);
 
                     // Check all spectra (over all stationarity periods) for any overlap
                     spectra
@@ -1380,6 +1386,9 @@ impl Theory for DarkPhoton {
 
                                     // Add contribution to chunk if there is overlap
                                     if overlap > 0 {
+                                        println!("detected overlap in chunk {chunk} of magnitude {overlap} of {coherence_time}");
+
+                                        overlap_counter.fetch_add(overlap, Ordering::Relaxed);
 
                                         // Get values at relevant frequencies
                                         let approx_sidereal: usize = approximate_sidereal(frequency_bin);
@@ -1393,7 +1402,6 @@ impl Theory for DarkPhoton {
                                         let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
                                         let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
                                         let relevant_range = start_relevant..=end_relevant;
-                                        log::trace!("relevant_range is {start_relevant}..={end_relevant}");
 
                                         // Interpolate power to appropriate frequencies
                                         let frequencies_to_interpolate_to: Vec<f32> = relevant_range
@@ -1410,6 +1418,9 @@ impl Theory for DarkPhoton {
                                                     .interpolate_checked(*f)
                                                     .unwrap(/* unwrapping for now if out of bounds */)
                                             }).collect();
+
+                                        let num_windows = interpolated_power.len() - (2*approx_sidereal + 1) + 1;
+                                        log::info!("theory var: coherence_time {coherence_time} chunk {chunk} has {num_windows} windows");
 
                                         // Get all relevant triplets and multiply them by their overlap weight
                                         interpolated_power
@@ -1433,9 +1444,9 @@ impl Theory for DarkPhoton {
                                                 let (ix, iy) = (e1.index-1, e2.index-1);
 
                                                 // Add/store triplet
-                                                inner_chunk_map
-                                                    .entry(window_index)
-                                                    .and_modify(|triplet| {
+                                                inner_chunk_window_map
+                                                    .entry((chunk, window_index))
+                                                    .and_modify(|triplet: &mut Triplet| {
 
                                                         // First, add to low triplet matrix (fa-fdhat)
                                                         triplet.low[[ix, iy]] += low;
@@ -1478,14 +1489,18 @@ impl Theory for DarkPhoton {
                                     }
                             });
                         });
+
+                    println!("expected total overlap {coherence_time}, got {}", overlap_counter.load(Ordering::Relaxed));
                 });
-                // Insert inner chunk containing this coherence time's power spectrum
-                // result
-                //     .insert(*coherence_time, inner_chunk_map);
+
                 // now we are just inserting into db
-                disk_db
-                    .insert_windows(*coherence_time, &inner_chunk_map)
-                    .expect("sigma insertion failed");
+                log::debug!("storing coh {coherence_time} map, with {} elements", inner_chunk_window_map.len());
+                // disk_db
+                //     .store_chunk_window_map(*coherence_time, &inner_chunk_window_map)
+                //     .expect("sigma insertion failed");
+                inner_chunk_window_map.into_iter().for_each(|((chunk, window), triplet)| {
+                    disk_db.store_chunk_window_map(*coherence_time, chunk, window, &triplet).unwrap();
+                });
 
                 // log::info!("Finished calculating power for coherence_time {coherence_time}");
                 stitch_pb.inc(1)
@@ -1513,17 +1528,10 @@ impl Theory for DarkPhoton {
         stationarity: Stationarity,
     ) -> Vec<(f32, f32)> {
 
-        // // Load sigma
-        // let node_id: usize = std::env::var("SLURM_NODEID").unwrap_or("0".to_string()).parse().unwrap();
-        // let sigma_db = DiskDB::connect(format!("./sigma_{node_id}/"))
-        //     .expect("database should exist by this stage");
-
-        // Initialize database where A_k and Ainv_k is stored
-        // let a_db = DiskDB::connect("./a/").unwrap();
-        // let ak_db = DiskDB::connect("./ak/").unwrap();
-
         // Get number of seconds in the continguous subset of dataset
         let num_secs = projections_complete.num_secs();
+        let zdb = rocksdb::DBWithThreadMode::<MultiThreaded>::open_default("z").unwrap();
+        let sdb = rocksdb::DBWithThreadMode::<MultiThreaded>::open_default("s").unwrap();
         
         let sz_coherence: DashMap<_, _> = set
             .into_iter()
@@ -1533,6 +1541,7 @@ impl Theory for DarkPhoton {
                 let num_chunks = num_secs / coherence_time;
                 let last_chunk: bool = num_secs % coherence_time > 0;
                 let total_chunks = num_chunks + if last_chunk { 1 } else { 0 };
+                log::info!("likelihood: coherence_time {coherence_time} has {total_chunks} chunks");
 
                 // Get theory mean for this coherence time
                 let theory_mean_ct: DashMap<usize, DarkPhotonMu> = bincode::deserialize(
@@ -1544,49 +1553,45 @@ impl Theory for DarkPhoton {
 
 
                 // For this coherence time, get the map to every triplet window (for sigma)
-                let window_map = self
+                let chunk_window_map = self
                     .theory_var
-                    .get_windows(*coherence_time)
+                    .get_chunk_window_map(*coherence_time)
                     .expect("failed to get window map")
                     .expect("window map not present in db");
 
-                // // Step 1 and 2: calculate inverse of A_k
-                let ainv = window_map
-                    .par_iter()
-                    .map(|kv2| {
-                        let (window, triplet) = kv2.pair();
-                        (*window, triplet.block_cholesky().block_inv())
-                        }).collect::<DashMap<_,_>>();
-
-                let sz_map = DashMap::new();
-                for chunk in 0..total_chunks {
+                    // Step 1 and 2: calculate inverse of A_k for all chunks and windows
+                    let ainv = chunk_window_map
+                        .par_iter()
+                        .map(|kv2| {
+                            let ((chunk, window), triplet) = kv2.pair();
+                            ((*chunk, *window), triplet.block_cholesky().block_inv())
+                            }).collect::<DashMap<_,_>>();
 
                     // Step 3: Calculate Y_k = Ainv_k * X_k for all windows in this chunk
-                    let y: DashMap<Window, DarkPhotonVec<f32>> = ainv
+                    let y: DashMap<(Chunk, Window), DarkPhotonVec<f32>> = ainv
                         .par_iter()
                         .map(|kv2| {
                             // Get triplet window and corresponding map
-                            let (window, ainv_triplet) = kv2.pair();
+                            let ((chunk, window), ainv_triplet) = kv2.pair();
                             
                             // Get data vector for this coh time, chunk, window
-                            let dv_key = [*coherence_time, chunk, *window].map(usize::to_le_bytes).concat();
+                            let dv_key = [*coherence_time, *chunk, *window].map(usize::to_le_bytes).concat();
                             let data_vector_window: DarkPhotonVec<f32> = bincode::deserialize(
                                 &self.data_vector
                                     .get(&dv_key)
                                     .expect("rocks db failure")
                                     .expect("data vector should exist for every window")
                             ).expect("deser failure");
-                            
-                            // (window, Ainv * Xk_)
-                            (*window, ainv_triplet.dot_vec_f32(&data_vector_window))
-                            }).collect::<DashMap<Window,DarkPhotonVec<f32>>>();
 
+                            // (window, Ainv * Xk_)
+                            ((*chunk, *window), ainv_triplet.dot_vec_f32(&data_vector_window))
+                            }).collect::<DashMap<(Chunk, Window), DarkPhotonVec<f32>>>();
                     // Step 4: Calculate nu_ik = Ainv_k * mu_ik
                     let nu = ainv
                         .par_iter()
                         .map(|kv2| {
                             // Get triplet window and corresponding map
-                            let (window, ainv_triplet) = kv2.pair();
+                            let ((chunk, window), ainv_triplet) = kv2.pair();
 
                             // Get theory mean for this chunk,
                             // scaled by the window's frequency
@@ -1617,15 +1622,15 @@ impl Theory for DarkPhoton {
                             assert_eq!(nu.shape(), &[15, 3]);
 
                             // Return nu with window as the key
-                            (*window, nu)
+                            ((*chunk, *window), nu)
                         }).collect::<DashMap<_, Array2<Complex<f32>>>>();
 
                     // Step 5: Calculate svd of Nik
                     // Step 6: Calculate Zk = Udag_k * Y_k
                     // This gets us s and z
-                    let sz = nu
+                    let sz_chunk_window_map = nu
                         .into_par_iter()
-                        .map(|(window, nu_window)| {
+                        .map(|((chunk, window), nu_window)| {
                             // Step 5: Carry out svd
                             // nu is a 15x3 matrix
                             assert_eq!(nu_window.shape(), &[15, 3]);
@@ -1636,7 +1641,6 @@ impl Theory for DarkPhoton {
                             assert_eq!(u.shape(), &[15, 3], "svd: u does not have correct shape");
                             assert_eq!(s.shape(), &[3], "svd: s does not have correct shape");
                             // assert_eq!(v.shape(), &[3, 3], "svd: v does not have correct shape");
-                            // TODO: Save to disk
 
                             // Conjugate and transpose v and u
                             // let vdag = v.t().map(|c| c.conj());
@@ -1645,25 +1649,25 @@ impl Theory for DarkPhoton {
                             assert_eq!(udag.shape(), &[3, 15], "congj t: udag does not have correct shape");
                             
                             // Step 6: Zk = Udag_k * Y_k
-                            let y_k = y.get(&window).expect("yk should exist for this window").to_vec();
+                            let y_k = y.get(&(chunk, window)).expect("yk should exist for this chunk, window").to_vec();
                             assert_eq!(y_k.shape(), &[15]);
                             let z = udag.dot(&y_k);
-                            // TODO: Save z to disk
                             assert_eq!(z.shape(), &[3]);
 
-                            (window, (s, z))
+                            // Save things to disk
+                            let z_and_s_key: Vec<u8> = [*coherence_time, chunk, window].map(usize::to_le_bytes).concat();
+                            zdb.put(&z_and_s_key, bincode::serialize(&z).unwrap()).unwrap();
+                            sdb.put(&z_and_s_key, bincode::serialize(&s).unwrap()).unwrap();
+
+                            ((chunk, window), (s, z))
                         }).collect::<DashMap<_, _>>();
 
-                    // Insert into sz map
-                    sz_map.insert(chunk, sz.into_read_only());
-                }
                 // Return sz map
-                (coherence_time, (frequency_bin, sz_map.into_read_only()))
+                (coherence_time, (frequency_bin, sz_chunk_window_map.into_read_only()))
             }).collect();
 
         let sz_coherence = sz_coherence.into_read_only();
 
-        // TODO: remove debug
         let (tx, rx) = bounded::<(f64, Vec<f64>)>(10);
         
         let handle = std::thread::spawn(move || {
@@ -1685,17 +1689,24 @@ impl Theory for DarkPhoton {
             }
         });
 
+        let (tx3, rx3) = unbounded::<(usize, usize)>();
+        let handle3 = std::thread::spawn(move || {
+            let mut missing_chunk_windows = std::fs::File::create("missing_chunk_windows.txt").unwrap();
+            while let Ok((chunk, window)) = rx3.recv() {
+                missing_chunk_windows.write(format!("{chunk} {window}\n").as_bytes()).unwrap();
+            }
+        });
+
         // Use SZ to calculate bounds
         let freqs_and_bounds: Vec<(f32, f32)> = sz_coherence
             .into_par_iter()
-            .map(|(coherence_time, (frequency_bin, sz_chunk_map))| {
+            .map(|(coherence_time, (frequency_bin, sz_chunk_window_map))| {
 
                 // Total number of chunks for this coherence time
                 let num_chunks = num_secs / coherence_time;
                 let last_chunk: bool = num_secs % coherence_time > 0;
                 let total_chunks = num_chunks + if last_chunk { 1 } else { 0 };
 
-                // let bounds = vec![];
                 let approx_sidereal: usize = approximate_sidereal(frequency_bin);
                 let num_fft_elements = *coherence_time;
                 if num_fft_elements < 2*approx_sidereal + 1 {
@@ -1704,50 +1715,56 @@ impl Theory for DarkPhoton {
                 let start_relevant: usize = frequency_bin.multiples.start().saturating_sub(approx_sidereal);
                 let end_relevant: usize = (*frequency_bin.multiples.end()+approx_sidereal).min(num_fft_elements-1);
                 let relevant_range = start_relevant..=end_relevant;
+                log::debug!("coherence_time = {coherence_time}, {start_relevant}..={end_relevant}");
+
+                // Gather windows from relevant range
+                let num_windows = num_windows(start_relevant, end_relevant, approx_sidereal);
+                assert_eq!(2 * approx_sidereal + num_windows, relevant_range.end()-relevant_range.start() + 1, "failed for coherence time {coherence_time}");
+                let relevant_windows = relevant_range.skip(approx_sidereal).take(num_windows);
 
                 // Now that we have all the window indices,
                 // for each of them collect all chunks and calculate bound
                 let bounds = Arc::new(Mutex::new(Vec::with_capacity(end_relevant-start_relevant+1)));
-                relevant_range
+                relevant_windows
                     .into_iter()
                     .enumerate()
                     .par_bridge()
                     .for_each(|(window_idx, multiple)| {
-                
-                    let _tx2 = tx2.clone();
+                        let _tx2 = tx2.clone();
 
-                    // Initialize vec to hold references to sz pairs for this frequency/window
-                    let mut sz_references = Vec::<&(Array1<f32>, Array1<Complex<f32>>)>::with_capacity(num_chunks);
-                    for chunk in 0..total_chunks {
-                        if let Some(reference) = sz_chunk_map
-                        .get(&chunk)
-                        .ok_or_else(|| chunk)
-                        .expect("chunk should exist")
-                        .get(&window_idx) {
-                            sz_references.push(reference);
-                        } else {
-                            println!("chunk, window = {chunk}, {window_idx} should exist but doesnt");
+                        // Initialize vec to hold references to sz pairs for this frequency/window
+                        let mut sz_references = Vec::<&(Array1<f32>, Array1<Complex<f32>>)>::with_capacity(num_chunks);
+                        for chunk in 0..total_chunks {
+                            if let Some(reference) = sz_chunk_window_map
+                            .get(&(chunk, window_idx)) {
+                                sz_references.push(reference);
+                            } else {
+                                log::error!("chunk, window = {chunk}, {window_idx} should exist for coh {coherence_time} but doesnt");
+                                tx3.send((chunk, window_idx)).unwrap();
+                            }
                         }
-                    }
-                    let frequency = multiple as f64 * frequency_bin.lower;
-                    // b.lock().unwrap().push((frequency as f32, bound(&sz_references)));
-                    match bound(frequency, &sz_references, tx.clone()) {
-                       Ok(eps_bound) => bounds.lock().unwrap().push((frequency as f32, eps_bound)),
-                       Err(err) => {
-                           _tx2.send((frequency, err)).unwrap();
-                           drop(_tx2);
-                       }
-                    }
+                        let frequency = multiple as f64 * frequency_bin.lower;
+
+                        // Step 7: calculate likelihood, 95% bound.
+                        match bound(frequency, &sz_references, tx.clone()) {
+                            Ok(eps_bound) => bounds.lock().unwrap().push((frequency as f32, eps_bound)),
+                            Err(err) => {
+                                _tx2.send((frequency, err)).unwrap();
+                            }
+                        }
                 });
 
                 Arc::try_unwrap(bounds).unwrap().into_inner().unwrap()
             }).flatten().collect();
 
-        // TODO: debug remove
         drop(tx);
         drop(tx2);
+        drop(tx3);
         handle.join().unwrap();
         handle2.join().unwrap();
+        handle3.join().unwrap();
+
+        println!("calculated {} bounds", freqs_and_bounds.len());
 
         freqs_and_bounds
     }
@@ -1919,16 +1936,9 @@ fn bound(
 
     // Find 95% confidence interval
     let mut upper_bound_logeps = max_logeps;
-    // TODO:
-    // Start with 0.5 to 0.5 window and grow until convegence
     #[allow(unused_mut)]
     let mut norm: f64 = quadrature::clenshaw_curtis::integrate(transformed_unnormalized_pdf, 1e-10.ln(), 1e1.ln(), 1e-4).integral;
     if !norm.is_normal() {
-        // compute fallback value
-        // let dlogeps = (max_logeps-min_logeps) / num_eps.sub(1) as f64;
-        // norm = logp_grid.into_iter().map(|);
-
-        // transformed_unnormalized_pdf
         return Err(BoundError::InvalidNorm { max_logeps })
     }
     
@@ -2176,9 +2186,18 @@ fn calculate_overlap(
     start2: usize,
     end2: usize
 ) -> usize {
-    start1.max(start2)
-        .checked_sub(end1.min(end2) + 1)
+    (end1.min(end2)+1)
+        .checked_sub(start1.max(start2))
         .unwrap_or(0)
+}
+
+#[test]
+fn test_overlap() {
+    assert_eq!(calculate_overlap(0, 4, 0, 4), 5);
+    assert_eq!(calculate_overlap(0, 4, 3, 4), 2);
+    assert_eq!(calculate_overlap(3, 4, 0, 4), 2);
+    assert_eq!(calculate_overlap(3, 4, 4, 10), 1);
+    assert_eq!(calculate_overlap(3, 4, 5, 10), 0);
 }
 
 /// This function takes in the weights w_i along with the station coordinates and calculates H_i(t)
@@ -2189,6 +2208,7 @@ fn dark_photon_auxiliary_values(
     weights_e: &DashMap<StationName, f32>,
     weights_wn: &TimeSeries,
     weights_we: &TimeSeries,
+    valid_entry_map: &DashMap<StationName, Array1<bool>>,
     // chunk_dataset: &DashMap<StationName, Dataset>,
 ) -> [TimeSeries; 7] {
 
@@ -2202,50 +2222,51 @@ fn dark_photon_auxiliary_values(
         // Here we iterate thrhough weights_n and not chunk_dataset because
         // stations in weight_n are a subset (filtered) of those in chunk_dataset.
         // Could perhaps save memory by dropping coressponding invalid datasets in chunk_dataset.
-        let auxiliary_value_series_unnormalized: f32 = weights_n
-            .iter()
-            .map(|key_value| {
+        let mut auxiliary_value_series_unnormalized: Array1<f32> = Array1::zeros(weights_wn.len());
 
-                // Unpack (key, value) pair
-                // Here, key is StationName and value = dataset
-                let station_name = key_value.key();
+        for key_value in weights_n.iter() {
+            // .map(|key_value| -> Array1<f32> { {
 
-                // Get station coordinate
-                let sc: &Coordinates = coordinates
-                    .get(station_name)
-                    .expect("station coordinates should exist");
+            // Unpack (key, value) pair
+            // Here, key is StationName and value = dataset
+            let station_name = key_value.key();
 
-                // Get product of relevant component of vector spherical harmonics and of the magnetic field.
-                let auxiliary_value = match i {
-                    
-                    // H1 summand = wn * cos(phi)^2
-                    1 => (sc.longitude.cos().powi(2) as f32).mul(*weights_n.get(station_name).unwrap()),
+            // Get station coordinate
+            let sc: &Coordinates = coordinates
+                .get(station_name)
+                .expect("station coordinates should exist");
 
-                    // H2 summand = wn * sin(phi) * cos(phi)
-                    2 => ((sc.longitude.sin() * sc.longitude.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
+            // Get product of relevant component of vector spherical harmonics and of the magnetic field.
+            let auxiliary_value = match i {
+                
+                // H1 summand = wn * cos(phi)^2
+                1 => (sc.longitude.cos().powi(2) as f32).mul(*weights_n.get(station_name).unwrap()),
 
-                    // H3 summand = we * cos(polar)^2
-                    3 => (sc.polar.cos().powi(2) as f32).mul(*weights_e.get(station_name).unwrap()),
+                // H2 summand = wn * sin(phi) * cos(phi)
+                2 => ((sc.longitude.sin() * sc.longitude.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
 
-                    // H4 summand = we * cos(phi)^2 * cos(polar)^2
-                    4 => ((sc.longitude.cos().powi(2) * sc.polar.cos().powi(2)) as f32).mul(*weights_n.get(station_name).unwrap()),
+                // H3 summand = we * cos(polar)^2
+                3 => (sc.polar.cos().powi(2) as f32).mul(*weights_e.get(station_name).unwrap()),
 
-                    // H5 summand = we * sin(phi) * cos(phi) * cos(polar)^2
-                    5 => ((sc.longitude.sin() * sc.longitude.cos() * sc.polar.cos().powi(2)) as f32)
-                        .mul(*weights_n.get(station_name).unwrap()),
+                // H4 summand = we * cos(phi)^2 * cos(polar)^2
+                4 => ((sc.longitude.cos().powi(2) * sc.polar.cos().powi(2)) as f32).mul(*weights_n.get(station_name).unwrap()),
 
-                    // H6 summand = we * cos(phi) * sin(polar) * cos(polar)
-                    6 => ((sc.longitude.cos() * sc.polar.sin() * sc.polar.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
+                // H5 summand = we * sin(phi) * cos(phi) * cos(polar)^2
+                5 => ((sc.longitude.sin() * sc.longitude.cos() * sc.polar.cos().powi(2)) as f32)
+                    .mul(*weights_n.get(station_name).unwrap()),
 
-                    // H7 summand = we * sin(phi) * sin(polar) * cos(polar)
-                    7 => ((sc.longitude.sin() * sc.polar.sin() * sc.polar.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
-                    
-                    _ => unreachable!("hardcoded to iterate from 1 to 7"),
-                };
+                // H6 summand = we * cos(phi) * sin(polar) * cos(polar)
+                6 => ((sc.longitude.cos() * sc.polar.sin() * sc.polar.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
 
-                auxiliary_value
-            }).sum();
-            // .fold(|| TimeSeries::default(size), |acc, station_aux| acc + station_aux);
+                // H7 summand = we * sin(phi) * sin(polar) * cos(polar)
+                7 => ((sc.longitude.sin() * sc.polar.sin() * sc.polar.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
+                
+                _ => unreachable!("hardcoded to iterate from 1 to 7"),
+            };
+
+            let station_series: Array1<f32> = (*valid_entry_map.get(station_name).expect("station should exist")).map(|flag| if *flag { 1.0 } else { 0.0 }) * auxiliary_value;
+            auxiliary_value_series_unnormalized.add_assign(&station_series);
+        }
 
             // Divide by correct Wi
             let auxiliary_value_series_normalized = match i {
@@ -2265,6 +2286,25 @@ fn dark_photon_auxiliary_values(
     auxiliary_values
 }
 
+fn num_windows(
+    start_padded: usize,
+    // end_padded is inclusive
+    end_padded: usize,
+    approximate_sidereal: usize
+) -> usize {
+    // end_padded is inclusive so we must add 1
+    let size = (end_padded - start_padded) + 1;
+    let window_size = (2*approximate_sidereal) + 1;
+    size - window_size + 1
+}
+
+#[test]
+fn test_num_windows() {
+    assert_eq!(num_windows(0, 4, 1), 3);
+    assert_eq!(num_windows(0, 9, 1), 8);
+    assert_eq!(num_windows(0, 9, 2), 6);
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct Power<T: Num + Clone> {
     power: Array1<Complex<T>>,
@@ -2278,13 +2318,7 @@ pub struct Triplet {
     pub low: Array2<Complex<f32>>,
     pub mid: Array2<Complex<f32>>,
     pub high: Array2<Complex<f32>>,
-    // TODO: add something like this to ensure we are only multiplying the correct frequencies
-    // pub lowf: f32,
     pub midf: f32,
-    // pub hif: f32,
-    // pub coh_time: usize,
-    // pub chunk: usize,
-    // pub window: Option<usize>
 }
 
 impl Triplet {
@@ -2301,35 +2335,6 @@ impl Triplet {
             // window: self.window,
         }
     }
-    // /// Applies the map to every entry in every block
-    // fn map<F>(&self, f: F) -> Triplet
-    // where
-    //     F: Fn(&Complex<f32>) -> Complex<f32>
-    // {
-    //     Triplet {
-    //         low: self.low.map(&f),
-    //         mid: self.mid.map(&f),
-    //         high: self.high.map(&f),
-    //         // lowf: self.lowf,
-    //         midf: self.midf,
-    //         // hif: self.hif,
-    //         // coh_time: self.coh_time,
-    //         // chunk: self.chunk,
-    //         // window: self.window,
-    //     }
-    // }
-    // /// This takes the [Triplet] self and multipled a [DarkPhotonVec] to produce another [DarkPhotonVec]
-    // /// via matrix multiplication, i.e. A.x = y
-    // fn dot_vec(&self, vecs: &DarkPhotonVec<f64>) -> DarkPhotonVec<f32> {
-    //     DarkPhotonVec {
-    //         low: self.low.dot(&vecs.low.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
-    //         mid: self.mid.dot(&vecs.mid.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
-    //         high: self.high.dot(&vecs.high.map(|x| Complex { re: x.re.to_f32().unwrap(), im: x.im.to_f32().unwrap() })),
-    //         // coh_time: vecs.coh_time,
-    //         // window: vecs.window,
-    //         // chunk: vecs.chunk,
-    //     }
-    // }
 
     /// This takes the [Triplet] self and multipled a [DarkPhotonVec] to produce another [DarkPhotonVec]
     /// via matrix multiplication, i.e. A.x = y
@@ -2380,109 +2385,10 @@ impl Triplet {
         
         }
     }
-
-    // /// Performs singular value decomposition on every block in the triplet,
-    // /// panicking if it failed.
-    // /// NOTE: The singular value decomposition of a block diagonal matrix is equal to a 
-    // /// block diagonal matrix with the singular value decomposition of the blocks. As such,
-    // /// we can do this for every triplet element independently.
-    // /// 
-    // /// TODO: ensure the middle array is correct (i.e. not transposed)
-    // fn block_svd(&self) -> (Triplet, Array2<f32>, Triplet) {
-    //     let (ulow, slow, vlow) = self.low.svd(true, true).expect("svd failed");
-    //     let (umid, smid, vmid) = self.mid.svd(true, true).expect("svd failed");
-    //     let (uhigh, shigh, vhigh) = self.high.svd(true, true).expect("svd failed");
-    //     (Triplet {
-    //         low: ulow.expect("requested u"),
-    //         mid: umid.expect("requested u"),
-    //         high: uhigh.expect("requested u"),
-    //         // lowf: self.lowf,
-    //         midf: self.midf,
-    //         // hif: self.hif,
-    //         // coh_time: self.coh_time,
-    //         // chunk: self.chunk,
-    //         // window: self.window,
-    //     },
-    //     Array2::from_shape_vec((3, 3), slow.into_iter().chain(smid.into_iter()).chain(shigh.into_iter()).collect()).expect("should be correct shape"),
-    //     Triplet {
-    //         low: vlow.expect("requested v"),
-    //         mid: vmid.expect("requested v"),
-    //         high: vhigh.expect("requested v"),
-    //         // lowf: self.lowf,
-    //         midf: self.midf,
-    //         // hif: self.hif,
-    //         // coh_time: self.coh_time,
-    //         // chunk: self.chunk,
-    //         // window: self.window,
-    //     })
-    // }
-
-    // /// Tranposes and conjugates every block
-    // fn dagger(&self) -> Self {
-    //     Triplet {
-    //         low: self.low.t().map(|c| c.conj()),
-    //         mid: self.mid.t().map(|c| c.conj()),
-    //         high: self.high.t().map(|c| c.conj()),
-    //         // lowf: self.lowf,
-    //         midf: self.midf,
-    //         // hif: self.hif,
-    //         // coh_time: self.coh_time,
-    //         // chunk: self.chunk,
-    //         // window: self.window,
-    //     }
-    // }
-
-    // /// Scale all blocks by the same scalar factor
-    // fn scale(&self, factor: f32) -> Self {
-    //     Self {
-    //         low: (&self.low).mul(factor),
-    //         mid: (&self.mid).mul(factor),
-    //         high: (&self.high).mul(factor),
-    //         // lowf: self.lowf,
-    //         midf: self.midf,
-    //         // hif: self.hif,
-    //         // coh_time: self.coh_time,
-    //         // chunk: self.chunk,
-    //         // window: self.window,
-    //     }
-    // }
 }
 
-// #[derive(Serialize, Deserialize, Clone, Copy)]
-// pub struct Triplet<T: Num + Clone> {
-//     low: SinglePower<T>,
-//     mid: SinglePower<T>,
-//     high: SinglePower<T>, 
-//     window: usize,
-// }
-// impl<T: Num + Clone + Debug> std::ops::AddAssign for Triplet<T>
-// where
-//     Complex<T>: std::ops::AddAssign
-// {
-//     fn add_assign(&mut self, rhs: Self) {
-//         assert_eq!(self.window, rhs.window, "invalid window for Triplet add_assign");
-//         self.low += rhs.low;
-//         self.mid += rhs.mid;
-//         self.high += rhs.high;
-//     }
-// }
-// impl<T: Num + Clone + Debug> std::ops::AddAssign for SinglePower<T>
-// where
-//     Complex<T>: std::ops::AddAssign
-// {
-//     fn add_assign(&mut self, rhs: Self) {
-//         assert_eq!(self.frequency, rhs.frequency, "invalid frequency for Triplet add_assign");
-//         self.power += rhs.power;
-//     }
-// }
-
-// #[derive(Serialize, Deserialize, Clone, Copy)]
-// pub struct SinglePower<T: Num + Clone> {
-//     power: Complex<T>,
-//     frequency: T,
-// }
-
-impl<T: Float> Power<T> {
+impl<T: Float> Power<T> 
+{
     pub fn map<'a, B, F>(&'a self, f: F) -> Power<T>
     where
         F: FnMut(&'a Complex<T>) -> Complex<T>,
@@ -2505,7 +2411,6 @@ impl<T: Float> Power<T> {
             ..*self
         }
     }
-    /// NOTE: these assign operations are not optimal. Perhaps a future TODO.
     pub fn add_assign<'a>(&'a mut self, rhs: &Array1<Complex<T>>) {
         self.power = (&self.power).add(rhs);
     }
@@ -2542,30 +2447,6 @@ impl<T: Float> Power<T> {
             .collect()
     }
 }
-
-/// This calculates the fft of a tophat function starting at t=0 and going to t=T, 
-/// the length of the longest contiguous subset of the dataset Xi(t). 
-/// 
-/// To reiterate/clarify, this function assumes there are no gaps in data availability.
-/// 
-/// At k = 0, this results in 0/0, requiring the use of the L'Hospital rule. As such,
-/// this case is dealt separately.
-// fn one_tilde(
-//     coherence_time: f64,
-//     chunk_index: usize,
-//     number_of_chunks: usize,
-//     k: f64,
-// ) -> Complex<f64> {
-//     match k {
-        
-//         // Deal with L'Hospital limit separately
-//         _k if k.is_zero() => Complex::new(coherence_time, 0.0),
-
-//         // Otherwise, evaluate function
-//         _ => (Complex::new(0.0, (1.0 - ((chunk_index + number_of_chunks) as f64 * coherence_time)/number_of_chunks as f64) * k).exp())*(-1.0 + Complex::new(0.0, coherence_time * k).exp())
-//                 / (-1.0 + Complex::new(0.0, k).exp())
-//     }
-// }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DarkPhotonAuxiliary {

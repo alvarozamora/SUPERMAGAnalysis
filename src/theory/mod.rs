@@ -2,7 +2,7 @@
 /// e.g. a dark photon, but also the functions that produce expected signals.
 pub mod dark_photon;
 
-use crate::utils::io::{DiskDB, Result};
+use crate::utils::io::DiskDB;
 use crate::weights::{ProjectionsComplete, Stationarity};
 use crate::{
     utils::{coordinates::construct_coordinate_map, loader::Dataset},
@@ -85,6 +85,7 @@ pub trait Theory: Send {
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
         chunk_dataset: &DashMap<StationName, Dataset>,
+        valid_entry_map: &DashMap<StationName, Array1<bool>>,
     ) -> Self::AuxiliaryValue;
 
     // Checks auxiliary values for nans. Returns true if there are no nans
@@ -132,13 +133,11 @@ pub trait Theory: Send {
 pub struct Mode(pub Degree, pub Order);
 
 /// These are the nonzero elements for a given theory
-#[derive(Debug, Hash, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, Hash, PartialEq, Eq, Clone, Serialize, Deserialize, Copy)]
 pub struct NonzeroElement {
     /// This is the index assigned to the element. Not to be confused with the
     /// chunk index
     pub index: usize,
-    /// Optional name for the field
-    pub name: Option<String>,
     /// Associated mode, component
     pub assc_mode: (Mode, Component),
 }

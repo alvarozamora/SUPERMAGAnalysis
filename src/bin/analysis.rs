@@ -8,9 +8,14 @@ use supermag_analysis::utils::async_balancer::Balancer;
 use supermag_analysis::weights::{Analysis, ProjectionsComplete, Stationarity};
 
 fn main() {
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
-        .init();
+    // env_logger::builder()
+    //     .filter_level(log::LevelFilter::Debug)
+    //     .init();
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(8)
+        .build_global()
+        .unwrap();
+    simple_logging::log_to_file("analysis.log", log::LevelFilter::Trace).unwrap();
 
     use sysinfo::{System, SystemExt};
     let mut sys = System::new_all();

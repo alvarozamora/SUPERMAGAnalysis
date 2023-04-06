@@ -7,7 +7,6 @@ use crate::{
 };
 use ndarray::{s, Array1};
 use dashmap::DashMap;
-use rocksdb::{DB, DBWithThreadMode, MultiThreaded};
 use serde::{Serialize, Deserialize};
 use tokio::{fs::File, io::AsyncWriteExt};
 use std::{sync::{Arc, Mutex}, ops::{RangeInclusive, Add}, error::Error, marker::PhantomData, io::Write};
@@ -125,7 +124,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         // Calculate local set of tasks
         // let set: Range<usize> = 0..loader.semivalid_chunks.len();
         let set: RangeInclusive<usize> = 1998..=2020;
-        let mut local_set: Option<Vec<usize>> = balancer.local_set(&set.collect());
+        let local_set: Option<Vec<usize>> = balancer.local_set(&set.collect());
         log::debug!("initialized local set");
 
 
@@ -176,7 +175,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     let num_entries: Mutex<Array1<usize>> = Mutex::new(Array1::from_vec(vec![0; dataset_length]));
 
                     // Calculate weights based on datasets for this chunk (stationarity period)
-                    calculate_weights_for_chunk(
+                    let valid_entry_map = calculate_weights_for_chunk(
                         year,
                         &local_hashmap_n,
                         &local_hashmap_e,
@@ -233,7 +232,8 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                             &local_hashmap_e,
                             &local_wn.lock().unwrap(),
                             &local_we.lock().unwrap(),
-                            &datasets
+                            &datasets,
+                            &valid_entry_map,
                         );
                     assert!(<T as Theory>::check_aux_for_nan(&chunk_auxiliary), "aux has nan");
 
@@ -673,7 +673,7 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         let frequency_bins: Vec<FrequencyBin> = frequencies_from_coherence_times(&coherence_times);
 
         // Partition zipped(coherence_times, frequency_bins) over ranks
-        let mut local_set: Vec<(usize, FrequencyBin)> = balancer
+        let local_set: Vec<(usize, FrequencyBin)> = balancer
             .local_set(
                 &coherence_times
                 .iter()
@@ -681,30 +681,22 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                 .zip(frequency_bins)
                 .collect()
             ).unwrap();
-        // // TODO: remove and do all coherence_times
-        // let last_bin = local_set.pop().unwrap();
-        // let max_freq = last_bin.1.lower * *last_bin.1.multiples.end() as f64;
-        // let min_freq = last_bin.1.lower * *last_bin.1.multiples.start() as f64;
-
-        // println!("last_bin has tc = {} and frequencies between {min_freq} and {max_freq}", last_bin.0, );
-        // let local_set = vec![last_bin];
-
         log::debug!("local_set consists of {} elements", local_set.len());
 
-        // Calculate data vector for this local set.
-        theory
-            .calculate_data_vector(&projections_complete_struct, &local_set);
-        log::debug!("finished data vector");
+        // // Calculate data vector for this local set.
+        // theory
+        //     .calculate_data_vector(&projections_complete_struct, &local_set);
+        // log::debug!("finished data vector");
         
-        // Calculate the theory mean
-        theory
-            .calculate_theory_mean(&local_set, total_secs, coherence_times.len(), Arc::clone(&auxiliary_complete));
-        log::debug!("finished mean");
+        // // Calculate the theory mean
+        // theory
+        //     .calculate_theory_mean(&local_set, total_secs, coherence_times.len(), Arc::clone(&auxiliary_complete));
+        // log::debug!("finished mean");
 
-        // Calculate the theory var
-        theory
-            .calculate_theory_var(&local_set, &projections_complete_struct, coherence_times.len(), stationarity, auxiliary_complete);
-        log::debug!("finished var");
+        // // Calculate the theory var
+        // theory
+        //     .calculate_theory_var(&local_set, &projections_complete_struct, coherence_times.len(), stationarity, auxiliary_complete);
+        // log::debug!("finished var");
 
         // Calculate bounds
         let bounds = theory
@@ -780,7 +772,7 @@ pub enum Coherence {
 
 
 /// Calculate the coherence times
-fn coherence_times(total_time: f64, threshold: f64) -> Vec<usize> {
+pub fn coherence_times(total_time: f64, threshold: f64) -> Vec<usize> {
 
     // Initialize return value
     let mut times = vec![];
@@ -816,7 +808,7 @@ fn coherence_times(total_time: f64, threshold: f64) -> Vec<usize> {
 
 /// Given a complete set of `coherence_times`, sorted in descending order, calculates
 /// the corresponding frequency bins
-fn frequencies_from_coherence_times(coherence_times: &Vec<usize>) -> Vec<FrequencyBin> {
+pub fn frequencies_from_coherence_times(coherence_times: &Vec<usize>) -> Vec<FrequencyBin> {
 
     assert!(
         coherence_times.iter().max().unwrap() > &I_MIN,
@@ -906,10 +898,10 @@ async fn calculate_weights_for_chunk(
     datasets: &DashMap<StationName, Dataset>,
     // local_valid_seconds: Arc<DashMap<usize /* index */, usize /* count */>>,
     num_entries: &Mutex<Array1<usize>>,
-) {
+) -> DashMap<StationName, Array1<bool>> {
     datasets
         .par_iter()
-        .for_each(|dataset| {
+        .flat_map(|dataset| {
         
             // Unpack value from (key, value) pair from DashMap
             let (station, dataset) = dataset.pair();
@@ -921,7 +913,7 @@ async fn calculate_weights_for_chunk(
             // If there are no valid entries, abort. Do not clean, and do not modify dashmap
             if num_samples == 0 {
                 println!("Station {} index {} aborting", &dataset.station_name, index);
-                return ()
+                return None
             }
 
             // Clean the fields and find valid entries
@@ -1007,7 +999,12 @@ async fn calculate_weights_for_chunk(
             local_hashmap_e.insert(dataset.station_name.clone(), e_weight);
             local_wn.lock().unwrap().add_assign(&wn_weight);
             local_we.lock().unwrap().add_assign(&we_weight);
-        });
+
+            // Return where there exist valid entries
+            Some((station.clone(), valid_entries_1))
+        })
+        .collect()
+
 }
 
 

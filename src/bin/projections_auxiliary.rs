@@ -4,6 +4,11 @@ use supermag_analysis::utils::async_balancer::Balancer;
 use supermag_analysis::weights::{Analysis, Stationarity};
 
 fn main() {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(6)
+        .build_global()
+        .unwrap();
+
     env_logger::builder()
         .filter_level(log::LevelFilter::Trace)
         .init();
