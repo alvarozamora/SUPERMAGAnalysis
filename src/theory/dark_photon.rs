@@ -25,16 +25,22 @@ use ndarray::{s, ScalarOperand, Array2, Axis};
 use num_traits::{ToPrimitive, Float, Num};
 use ndrustfft::Complex;
 use std::sync::{Mutex, atomic::{Ordering, AtomicU32}};
-use std::f32::consts::PI as SINGLE_PI;
+use std::f64::consts::PI as DOUBLE_PI;
 use indicatif::{ProgressBar, MultiProgress, ProgressStyle};
 use ndarray_linalg::{Cholesky, solve::Inverse, UPLO};
 
 
-const ZERO: Complex<f32> = Complex::new(0.0, 0.0);
-const ONE: Complex<f32> = Complex::new(1.0, 0.0);
+const ZERO: Complex<FloatType> = Complex::new(0.0, 0.0);
+const ONE: Complex<FloatType> = Complex::new(1.0, 0.0);
 
 /// Size of chunks (used for noise spectra ffts)
-const TAU: usize = 16384 * 64;
+// const TAU: usize = 16384 * 64;
+// TODO: revert
+// const TAU_REDUCTION_FACTOR_TEST: usize = 8;
+// const TAU: usize = 16384 * 64 / TAU_REDUCTION_FACTOR_TEST;
+// const TAU: usize = 16384 * 64 / 16;
+const TAU: usize = 65_536;
+const MAX_FREQUENCY: FloatType = (TAU - 1) as FloatType / TAU as FloatType;
 
 type Chunk = usize;
 type Window = usize;
@@ -42,14 +48,14 @@ pub type InnerVarChunkWindowMap = DashMap<(Chunk, Window), Triplet>;
 pub type InnerAChunkWindowMap = DashMap<Window, DashMap<Triplet, (Array2<Complex<f32>>,  Array2<Complex<f32>>)>>;
 
 
-type DarkPhotonVecSphFn = Arc<dyn Fn(f32, f32) -> f32 + Send + 'static + Sync>;
+type DarkPhotonVecSphFn = Arc<dyn Fn(FloatType, FloatType) -> FloatType + Send + 'static + Sync>;
 
 #[derive(Clone)]
 pub struct DarkPhoton {
     pub vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>>,
     // The RwLock guarantees only one thread is every modifying the database, making SingleThreaded safe
-    pub data_vector: Arc<DBWithThreadMode<SingleThreaded>>,
-    pub theory_mean: Arc<DBWithThreadMode<SingleThreaded>>,
+    pub data_vector: Arc<DBWithThreadMode<MultiThreaded>>,
+    pub theory_mean: Arc<DBWithThreadMode<MultiThreaded>>,
     pub theory_var: Arc<DiskDB>,
 }
 
@@ -104,28 +110,28 @@ impl DarkPhoton {
         // Manual override to remove prefactors
         let vec_sph_fns: Arc<DashMap<NonzeroElement, DarkPhotonVecSphFn>> = Arc::new(DashMap::new());
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[0].clone(),
-            Arc::new(|_theta: f32, phi: f32| -> f32 {
+            DARK_PHOTON_NONZERO_ELEMENTS[0],
+            Arc::new(|_theta: FloatType, phi: FloatType| -> FloatType {
                 phi.sin()
             }));
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[1].clone(),
-            Arc::new(|_theta: f32, phi: f32| -> f32 {
+            DARK_PHOTON_NONZERO_ELEMENTS[1],
+            Arc::new(|_theta: FloatType, phi: FloatType| -> FloatType {
                 phi.cos()
             }));
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[2].clone(),
-            Arc::new(|theta: f32, phi: f32| -> f32 {
+            DARK_PHOTON_NONZERO_ELEMENTS[2],
+            Arc::new(|theta: FloatType, phi: FloatType| -> FloatType {
                 phi.cos() * theta.cos()
             }));
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[3].clone(),
-            Arc::new(|theta: f32, phi: f32| -> f32 {
+            DARK_PHOTON_NONZERO_ELEMENTS[3],
+            Arc::new(|theta: FloatType, phi: FloatType| -> FloatType {
                 - phi.sin() * theta.cos()
             }));
         vec_sph_fns.insert(
-            DARK_PHOTON_NONZERO_ELEMENTS[4].clone(),
-            Arc::new(|theta: f32, _phi: f32| -> f32 {
+            DARK_PHOTON_NONZERO_ELEMENTS[4],
+            Arc::new(|theta: FloatType, _phi: FloatType| -> FloatType {
                 theta.sin()
             }));
 
@@ -134,8 +140,8 @@ impl DarkPhoton {
 
         DarkPhoton {
             vec_sph_fns,
-            data_vector: Arc::new(DBWithThreadMode::<SingleThreaded>::open_default("dark_photon_data_vector").expect("data vector db failed to open")),
-            theory_mean: Arc::new(DBWithThreadMode::<SingleThreaded>::open_default("dark_photon_theory_mean").expect("theory mean db failed to open")),
+            data_vector: Arc::new(DBWithThreadMode::<MultiThreaded>::open_default("dark_photon_data_vector").expect("data vector db failed to open")),
+            theory_mean: Arc::new(DBWithThreadMode::<MultiThreaded>::open_default("dark_photon_theory_mean").expect("theory mean db failed to open")),
             theory_var: Arc::new(DiskDB::connect("dark_photon_theory_var").expect("theory var db")),
         }
 
@@ -170,8 +176,8 @@ impl Theory for DarkPhoton {
 
     fn calculate_projections(
         &self,
-        weights_n: &DashMap<StationName, f32>,
-        weights_e: &DashMap<StationName, f32>,
+        weights_n: &DashMap<StationName, FloatType>,
+        weights_e: &DashMap<StationName, FloatType>,
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
         chunk_dataset: &DashMap<StationName, Dataset>,
@@ -217,7 +223,7 @@ impl Theory for DarkPhoton {
                             // };
 
                             // Manual Override
-                            let relevant_vec_sph = vec_sph_fn(dataset.coordinates.polar as f32, dataset.coordinates.longitude as f32);
+                            let relevant_vec_sph = vec_sph_fn(dataset.coordinates.polar as FloatType, dataset.coordinates.longitude as FloatType);
                             assert!(!relevant_vec_sph.is_nan(), "spherical harmonic is nan");
 
                             // Note that this multiplies the magnetic field by the appropriate weights, so it's not quite the measured magnetic field
@@ -251,8 +257,8 @@ impl Theory for DarkPhoton {
     /// This calculates the auxiliary values for a chunk.
     fn calculate_auxiliary_values(
         &self,
-        weights_n: &DashMap<StationName, f32>,
-        weights_e: &DashMap<StationName, f32>,
+        weights_n: &DashMap<StationName, FloatType>,
+        weights_e: &DashMap<StationName, FloatType>,
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
         _chunk_dataset: &DashMap<StationName, Dataset>,
@@ -336,7 +342,7 @@ impl Theory for DarkPhoton {
 
                         // Chunk series
                         log::trace!("constructing 2d series");
-                        let mut two_dim_series: Array2<Complex<f32>> = series
+                        let mut two_dim_series: Array2<Complex<FloatType>> = series
                             .slice(s!(0..exact_chunks_size))
                             .into_shape((exact_chunks, *coherence_time))
                             .expect("This shouldn't fail ever. If anything we should get an early panic from .slice()")
@@ -346,7 +352,7 @@ impl Theory for DarkPhoton {
                         
                             log::trace!("appending padded chunk");
                             if last_chunk_size > 0 {
-                            let mut last_chunk_pad = Array1::<Complex<f32>>::zeros(*coherence_time);
+                            let mut last_chunk_pad = Array1::<Complex<FloatType>>::zeros(*coherence_time);
                             last_chunk_pad
                                 .slice_mut(s![0..last_chunk_size])
                                 .assign(&series
@@ -432,9 +438,9 @@ impl Theory for DarkPhoton {
                                             || {
                                                 // Initialize with zeros and metadata
                                                 let mut inner_data_vector = DarkPhotonVec {
-                                                    low: Array1::<Complex<f32>>::zeros(5),
-                                                    mid: Array1::<Complex<f32>>::zeros(5),
-                                                    high: Array1::<Complex<f32>>::zeros(5),
+                                                    low: Array1::<Complex<FloatType>>::zeros(5),
+                                                    mid: Array1::<Complex<FloatType>>::zeros(5),
+                                                    high: Array1::<Complex<FloatType>>::zeros(5),
                                                 };
 
                                                 match element {
@@ -484,7 +490,7 @@ impl Theory for DarkPhoton {
 
                                             // Otherwise update existing element
                                             },|inner_data_vector_bytes: Vec<u8>| {
-                                                let mut inner_data_vector: DarkPhotonVec<f32> = bincode::deserialize(&inner_data_vector_bytes).unwrap();
+                                                let mut inner_data_vector: DarkPhotonVec<FloatType> = bincode::deserialize(&inner_data_vector_bytes).unwrap();
                                                 match element {
                                                     e if e == dp1 => {
                                                         assert!(inner_data_vector.low[0].is_zero());
@@ -578,9 +584,9 @@ impl Theory for DarkPhoton {
                 log::info!("theory mean: coherence_time {coherence_time} has {total_chunks} chunks");
                 
                 // TODO: refactor elsewhere to be user input or part of some fit
-                const RHO: f32 = 6.04e7;
-                const R: f32 = 0.0212751;
-                let mux_prefactor: f32 = SINGLE_PI * R * (2.0 * RHO).sqrt() / 4.0;
+                const RHO: FloatType = 6.04e7;
+                const R: FloatType = 0.0212751;
+                let mux_prefactor: FloatType = DOUBLE_PI as FloatType * R * (2.0 * RHO).sqrt() / 4.0;
 
                 // This is the inner chunk map from chunk to coherence time
                 let inner_chunk_map = DashMap::new();
@@ -596,38 +602,38 @@ impl Theory for DarkPhoton {
                     // exp(ix) = cos(x) + i sin(x)
                     //
                     // Note: when you encounter a chunk that has total time < coherence time, the s![start..end] below will truncate it.
-                    // let cis_fh_f = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    // let cis_fh_f = Array1::range(0.0, *coherence_time as FloatType, 1.0)
                     let cis_fh_f = (start..end)
-                        .map(|x| Complex { re: x as f32, im: 0.0 })
-                        .collect::<Array1<Complex<f32>>>()
+                        .map(|x| Complex { re: x as FloatType, im: 0.0 })
+                        .collect::<Array1<Complex<FloatType>>>()
                         .mul(
                             Complex {
                                 re: 0.0, 
                                 // 2 * PI * (fdhat - fd)
-                                im: 2.0 * SINGLE_PI * ((approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed") - FD as f32),
+                                im: 2.0 * DOUBLE_PI as FloatType * ((approximate_sidereal(frequency_bin) as FloatType * frequency_bin.lower as FloatType) - FD as FloatType),
                             }
                         )
                         .mapv(Complex::exp);
-                    // let cis_f = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    // let cis_f = Array1::range(0.0, *coherence_time as FloatType, 1.0)
                     let cis_f = (start..end)
-                        .map(|x| Complex { re: x as f32, im: 0.0 })
-                        .collect::<Array1<Complex<f32>>>()
+                        .map(|x| Complex { re: x as FloatType, im: 0.0 })
+                        .collect::<Array1<Complex<FloatType>>>()
                         .mul(
                             Complex {
                                 re: 0.0, 
-                                im: 2.0 * SINGLE_PI * FD as f32,
+                                im: 2.0 * DOUBLE_PI as FloatType * FD as FloatType,
                             }
                         )
                         .mapv(Complex::exp);
-                    // let cis_f_fh = Array1::range(0.0, *coherence_time as f32, 1.0)
+                    // let cis_f_fh = Array1::range(0.0, *coherence_time as FloatType, 1.0)
                     let cis_f_fh = (start..end)
-                        .map(|x| Complex { re: x as f32, im: 0.0 })
-                        .collect::<Array1<Complex<f32>>>()
+                        .map(|x| Complex { re: x as FloatType, im: 0.0 })
+                        .collect::<Array1<Complex<FloatType>>>()
                         .mul(
                             Complex {
                                 re: 0.0, 
                                 // This minus sign flips (fdhat-fd) --> (fd-fdhat)
-                                im: -2.0 * SINGLE_PI * ((approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed") - FD as f32),
+                                im: -2.0 * DOUBLE_PI as FloatType * ((approximate_sidereal(frequency_bin) as FloatType * frequency_bin.lower as FloatType)- FD as FloatType),
                             }
                         )
                         .mapv(Complex::exp);
@@ -699,7 +705,7 @@ impl Theory for DarkPhoton {
                     // mux5 is Real(FT of 2*(1-H1)) = -2*Real(FT of H1-1)
                     //         + Im(FT of 2*H2)  = 2 * Im(FT fo H2)
                     // at f = fd
-                    let mux5: Complex<f32> = {
+                    let mux5: Complex<FloatType> = {
 
                         // Real(FT of 2*(1-H1)) = -2*Real(FT of (H1-1))
                         let first_term = -2.0*(&cis_f)
@@ -721,7 +727,7 @@ impl Theory for DarkPhoton {
 
                     // mux6 is Real(FT of 2*H2) + Im(FT of 2*H1)
                     // at f = fd
-                    let mux6: Complex<f32> = {
+                    let mux6: Complex<FloatType> = {
 
                         // Real(FT of 2*H2)
                         let first_term = 2.0*(&cis_f)
@@ -743,7 +749,7 @@ impl Theory for DarkPhoton {
 
                     // mux7 is Real(FT of 2*H4) - Im(FT of 2*H5)
                     // at f = fd
-                    let mux7: Complex<f32> = {
+                    let mux7: Complex<FloatType> = {
 
                         // Real(FT of 2*H4)
                         let first_term = 2.0*(&cis_f)
@@ -764,7 +770,7 @@ impl Theory for DarkPhoton {
 
                     // mux8 is Real(FT of -2*H5) + Im(FT of 2*(H3-H4))
                     // at f = fd
-                    let mux8: Complex<f32> = {
+                    let mux8: Complex<FloatType> = {
 
                         // Real(FT of -2*H5)
                         let first_term = -2.0*(&cis_f)
@@ -785,7 +791,7 @@ impl Theory for DarkPhoton {
 
                     // mux9 is Real(FT of 2*H6) - Im(FT of 2*H7)
                     // at f = fd
-                    let mux9: Complex<f32> = {
+                    let mux9: Complex<FloatType> = {
 
                         // Real(FT of 2*H6)
                         let first_term = 2.0*(&cis_f)
@@ -807,7 +813,7 @@ impl Theory for DarkPhoton {
                     // start of f = fdhat-fd components
 
                     // mux10 is FT of (1 - H1 - iH2) at f = fdhat-fd
-                    let mux10: Complex<f32> = (&cis_fh_f)
+                    let mux10: Complex<FloatType> = (&cis_fh_f)
                         .mul(h1
                                 .iter()
                                 .zip(h2)
@@ -817,7 +823,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // mux11 is FT of (H2 - iH1) at f = fdhat-fd
-                    let mux11: Complex<f32> = (&cis_fh_f)
+                    let mux11: Complex<FloatType> = (&cis_fh_f)
                         .mul(h1
                             .iter()
                             .zip(h2)
@@ -827,7 +833,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // mux12 is FT of (H4 + iH5) at f = fdhat-fd
-                    let mux12: Complex<f32> = (&cis_fh_f)
+                    let mux12: Complex<FloatType> = (&cis_fh_f)
                         .mul(h4
                             .iter()
                             .zip(h5)
@@ -837,7 +843,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // mux13 is FT of (-H5 + i*(H4 - H3)) at f = fdhat-fd
-                    let mux13: Complex<f32> = (&cis_fh_f)
+                    let mux13: Complex<FloatType> = (&cis_fh_f)
                         .mul(h3
                             .iter()
                             .zip(h4)
@@ -848,7 +854,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // mux14 is FT of (H6 + iH7) at f = fdhat-fd
-                    let mux14: Complex<f32> = (&cis_fh_f)
+                    let mux14: Complex<FloatType> = (&cis_fh_f)
                         .mul(h6
                             .iter()
                             .zip(h7)
@@ -858,7 +864,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // start of muy
-                    let muy_prefactor: f32 = -mux_prefactor;
+                    let muy_prefactor: FloatType = -mux_prefactor;
 
                     // Start of f = fd-fdhat components
 
@@ -916,7 +922,7 @@ impl Theory for DarkPhoton {
                     // start of f=fd components
 
                     // muy5 is 2*Re(FT(H2)) + 2*Im(FT(H1-1)) at f = fd
-                    let muy5: Complex<f32> = {
+                    let muy5: Complex<FloatType> = {
 
                         //  2*Re(FT(H2))
                         let first_term = 2.0*(&cis_f)
@@ -937,7 +943,7 @@ impl Theory for DarkPhoton {
 
 
                     // muy6 is 2*Re(FT(H1)) - Im(FT(H2)) at f = fd
-                    let muy6: Complex<f32> = {
+                    let muy6: Complex<FloatType> = {
 
                         // 2*Re(FT(H1))
                         let first_term = 2.0*(&cis_f)
@@ -958,7 +964,7 @@ impl Theory for DarkPhoton {
 
 
                     // muy7 is -2*Re(FT(H5)) - 2*Im(FT(H4)) at f = fd
-                    let muy7: Complex<f32> = {
+                    let muy7: Complex<FloatType> = {
 
                         // -2*Re(FT(H5))
                         let first_term = -2.0*(&cis_f)
@@ -978,7 +984,7 @@ impl Theory for DarkPhoton {
                     };
 
                     // muy8 is 2*Re(FT(H3-H4)) + 2*Im(FT(H5)) at f = fd
-                    let muy8: Complex<f32> = {
+                    let muy8: Complex<FloatType> = {
 
                         // 2*Re(FT(H3-H4))
                         let first_term = 2.0*(&cis_f)
@@ -998,7 +1004,7 @@ impl Theory for DarkPhoton {
                     };
 
                     // muy9 is -2*Re(FT(H7)) - 2*Im(FT(H6))
-                    let muy9: Complex<f32> = {
+                    let muy9: Complex<FloatType> = {
 
                         // -2*Re(FT(H7))
                         let first_term = -2.0*(&cis_f)
@@ -1020,8 +1026,8 @@ impl Theory for DarkPhoton {
                     // start of f = fdhat-fd components
 
                     // muy10 is FT(H2 + i*(1-H1)) at f = fdhat - fd
-                    let muy10: Complex<f32> = (&cis_fh_f)
-                        .mul(Complex::<f32>::new(1.0, 0.0)
+                    let muy10: Complex<FloatType> = (&cis_fh_f)
+                        .mul(Complex::<FloatType>::new(1.0, 0.0)
                             .add(h1
                                 .iter()
                                 .zip(h2)
@@ -1031,7 +1037,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // muy11 is FT(H1 + iH2) at f = fdhat - fd
-                    let muy11: Complex<f32> = (&cis_fh_f)
+                    let muy11: Complex<FloatType> = (&cis_fh_f)
                         .mul(h1
                             .iter()
                             .zip(h2)
@@ -1041,7 +1047,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // muy12 is FT(-H5 + iH4) at f = fdhat-fd
-                    let muy12: Complex<f32> = (&cis_fh_f)
+                    let muy12: Complex<FloatType> = (&cis_fh_f)
                         .mul(h4
                             .iter()
                             .zip(h5)
@@ -1051,7 +1057,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // muy13 is FT(H3-H4-iH5) at f = fdhat-fd
-                    let muy13: Complex<f32> = (&cis_fh_f)
+                    let muy13: Complex<FloatType> = (&cis_fh_f)
                         .mul(h3
                             .iter()
                             .zip(h4)
@@ -1062,7 +1068,7 @@ impl Theory for DarkPhoton {
                         .sum();
 
                     // muy14 is FT of (-H7 + iH6) at f = fdhat-fd
-                    let muy14: Complex<f32> = (&cis_fh_f)
+                    let muy14: Complex<FloatType> = (&cis_fh_f)
                         .mul(h6
                             .iter()
                             .zip(h7)
@@ -1077,42 +1083,42 @@ impl Theory for DarkPhoton {
                     let [muz0, muz1, muz5, muz6, muz10, muz11] = [ZERO; 6];
 
                     // Now the nonzero components mu2, mu3, mu4, mu7, mu8, mu9, mu12, mu13, mu14
-                    let muz_prefactor: f32 = 2.0 * mux_prefactor;
+                    let muz_prefactor: FloatType = 2.0 * mux_prefactor;
                     
                     // muz 2, 3, 4 are all at f = -fdhat
-                    let fdhat = (approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower).to_f32().expect("double to single failed");
+                    let fdhat = (approximate_sidereal(frequency_bin).to_f64().expect("usize to double failed") * frequency_bin.lower) as FloatType;
                     let cis_mfh = (start..end)
-                        .map(|x| Complex { re: x as f32, im: 0.0 })
-                        .collect::<Array1<Complex<f32>>>()
-                        .mul(Complex::new(0.0, 2.0 * SINGLE_PI * -fdhat))
+                        .map(|x| Complex { re: x as FloatType, im: 0.0 })
+                        .collect::<Array1<Complex<FloatType>>>()
+                        .mul(Complex::new(0.0, 2.0 * DOUBLE_PI as FloatType * -fdhat))
                         .mapv(Complex::exp);
                     let cis_fh = (start..end)
-                        .map(|x| Complex { re: x as f32, im: 0.0 })
-                        .collect::<Array1<Complex<f32>>>()
-                        .mul(Complex::new(0.0, 2.0 * SINGLE_PI * fdhat))
+                        .map(|x| Complex { re: x as FloatType, im: 0.0 })
+                        .collect::<Array1<Complex<FloatType>>>()
+                        .mul(Complex::new(0.0, 2.0 * DOUBLE_PI as FloatType * fdhat))
                         .mapv(Complex::exp);
 
                     // muz2 is FT(H6) at f = -fdhat
-                    let muz2: Complex<f32> = (&cis_mfh).mul(&h6).mul(muz_prefactor).sum();
+                    let muz2: Complex<FloatType> = (&cis_mfh).mul(&h6).mul(muz_prefactor).sum();
                     // muz3 is FT(-H7) at f = -fdhat
-                    let muz3: Complex<f32> = -(&cis_mfh).mul(&h7).mul(muz_prefactor).sum();
+                    let muz3: Complex<FloatType> = -(&cis_mfh).mul(&h7).mul(muz_prefactor).sum();
                     // muz4 is -FT(H3-1) at f = -fdhat (notice negative)
-                    let muz4: Complex<f32> = -(&cis_mfh).mul(&h3.sub(1.0)).mul(muz_prefactor).sum();
+                    let muz4: Complex<FloatType> = -(&cis_mfh).mul(&h3.sub(1.0)).mul(muz_prefactor).sum();
 
                     // Note: These terms need the - along with prefactor for the f32 -> Complex<f32> into() to work
                     // muz7 is FT(H6) at f = 0
-                    let muz7: Complex<f32> = h6.mul(muz_prefactor).sum().into();
+                    let muz7: Complex<FloatType> = h6.mul(muz_prefactor).sum().into();
                     // muz8 is FT(-H7) at f = 0
-                    let muz8: Complex<f32> = h7.mul(-muz_prefactor).sum().into();
+                    let muz8: Complex<FloatType> = h7.mul(-muz_prefactor).sum().into();
                     // muz9 is -FT(H3-1) at f = 0 (notice negative in front of FT)
-                    let muz9: Complex<f32> = h3.sub(1.0).mul(-muz_prefactor).sum().into();
+                    let muz9: Complex<FloatType> = h3.sub(1.0).mul(-muz_prefactor).sum().into();
 
                     // muz12 is FT(H6) at f = fdhat
-                    let muz12: Complex<f32> = (&cis_fh).mul(&h6).mul(muz_prefactor).sum();
+                    let muz12: Complex<FloatType> = (&cis_fh).mul(&h6).mul(muz_prefactor).sum();
                     // muz13 is FT(-H7) at f = fdhat
-                    let muz13: Complex<f32> = -(&cis_fh).mul(&h7).mul(muz_prefactor).sum();
+                    let muz13: Complex<FloatType> = -(&cis_fh).mul(&h7).mul(muz_prefactor).sum();
                     // muz14 is -FT(H3-1) at f = fdhat (notice negative in front of FT)
-                    let muz14: Complex<f32> = -(&cis_fh).mul(&h3.sub(1.0)).mul(muz_prefactor).sum();
+                    let muz14: Complex<FloatType> = -(&cis_fh).mul(&h3.sub(1.0)).mul(muz_prefactor).sum();
 
                     let chunk_mu = DarkPhotonMu {
                         x: [mux0, mux1, mux2, mux3, mux4, mux5, mux6, mux7, mux8, mux9, mux10, mux11, mux12, mux13, mux14],
@@ -1144,6 +1150,14 @@ impl Theory for DarkPhoton {
         #[allow(unused)]
         auxiliary_values: Arc<Self::AuxiliaryValue>,
     ) {
+
+        // Clear database
+        const CLEAR_VAR_DB: bool = true;
+        if CLEAR_VAR_DB {
+            self.theory_var.clear();
+            println!("cleared var db");
+        }
+
         // Map of Map of Vars
         // key is stationary time chunk (e.g. year)
         let spectra = DashMap::with_capacity(coherence_times);
@@ -1154,6 +1168,10 @@ impl Theory for DarkPhoton {
 
         // NOTE: This is hardcoded for stationarity = 1 year
         // NOTE: These are the ones that 
+        // TODO: revert. This was used for extracting only a single year/tau
+        // let test_year = 2009;
+        // std::iter::once(test_year).for_each(|year| {
+
         (2003..2021).into_iter().for_each(|year| {
 
             // Get stationarity period indices (place within entire SUPERMAG dataset)
@@ -1172,7 +1190,7 @@ impl Theory for DarkPhoton {
             assert!(start_in_series < end_in_series, "invalid range");
 
             // Get the subseries for this year
-            let projections_subset: DashMap<NonzeroElement, Vec<f32>> = projections_complete
+            let projections_subset: DashMap<NonzeroElement, Vec<FloatType>> = projections_complete
                 .iter()
                 .map(|kv| {
                     // Get element and the complete longest contiguous series
@@ -1197,11 +1215,10 @@ impl Theory for DarkPhoton {
                     let hi = (k + 1) * chunk_size + (k + 1).min(chunk_mod);
                     [lo, hi]
                 }).collect_vec();
-
         
             let chunk_collection: Vec<_> = stationarity_chunks.into_par_iter().map(|stationarity_chunk| {
                 // Get the data for this chunk, pad it to have length equal to a power of 2, and take its fft
-                let chunk_ffts: Vec<(NonzeroElement, Power<f32>)> = projections_subset
+                let chunk_ffts: Vec<(NonzeroElement, Power<FloatType>)> = projections_subset
                     .iter()
                     .map(|kv| {
 
@@ -1213,7 +1230,7 @@ impl Theory for DarkPhoton {
 
                         // Padded series
                         let chunk_size = stationarity_chunk[1] - stationarity_chunk[0];
-                        let mut padded_series = Array1::<Complex<f32>>::zeros(2*TAU);
+                        let mut padded_series = Array1::<Complex<FloatType>>::zeros(2*TAU);
                         log::trace!(
                             "theory var: size of chunk is {}, being placed in a {} series of zeros",
                             chunk_size, padded_series.len(),
@@ -1241,7 +1258,7 @@ impl Theory for DarkPhoton {
                     }).collect();
 
                 // Initialize dashmap for correlation
-                let chunk_ffts_squared: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DashMap::new();
+                let chunk_ffts_squared: DashMap<(NonzeroElement, NonzeroElement), Power<FloatType>> = DashMap::new();
                 for (e1, fft1) in chunk_ffts.iter() {
                     // Check ffts
                     assert!(fft1.power.iter().all(|x| !x.is_nan()), "fft has nan");
@@ -1253,7 +1270,7 @@ impl Theory for DarkPhoton {
                              // so its okay to use fft2.power and discard start/end and inherit
                              // start/end from fft1
                              (fft1.mul(&fft2.power.map(Complex::conj)))
-                                .mul_scalar(((stationarity_chunk[1] - stationarity_chunk[0]) as f32).recip())
+                                .mul_scalar(((stationarity_chunk[1] - stationarity_chunk[0]) as FloatType).recip())
                         );
                     }
                 }
@@ -1263,13 +1280,13 @@ impl Theory for DarkPhoton {
 
             // Take the average. 
             // First, initialize zero arrays 
-            let avg_power: DashMap<(NonzeroElement, NonzeroElement), Power<f32>> = DARK_PHOTON_NONZERO_ELEMENTS
+            let avg_power: DashMap<(NonzeroElement, NonzeroElement), Power<FloatType>> = DARK_PHOTON_NONZERO_ELEMENTS
                 .iter()
                 .cartesian_product(DARK_PHOTON_NONZERO_ELEMENTS.iter())
                 .map(|(e1, e2)| ((*e1, *e2), Power { power: Array1::zeros(2*TAU), start_sec: start_in_series, end_sec: end_in_series }))
                 .collect();
             // Then, sum (get denominator before consuming iterator)
-            let denominator = chunk_collection.len() as f32;
+            let denominator = chunk_collection.len() as FloatType;
             chunk_collection
                 .into_iter()
                 .for_each(|chunk| {
@@ -1288,6 +1305,53 @@ impl Theory for DarkPhoton {
                 .iter_mut()
                 .for_each(|mut kv| kv.value_mut().div_assign_scalar(denominator * ONE));
             
+            // TODO revert: this roughly checks scaled vs interp power
+            if year == 2009 {            
+                let test_coherence_time = 10_198_740;
+                let mut freqs: Option<Vec<FloatType>> = None;
+                let test_power: HashMap<_, _> = avg_power.iter().flat_map(|kv| {
+                    let ((e1, e2), p) = kv.pair();
+                    if e1 == e2 {
+                        if freqs.is_none() {
+                            freqs = Some(p.frequencies())
+                        }
+                        Some(((*e1, *e2), (&p.power) * test_coherence_time as f32))
+                    } else {
+                        None
+                    }
+                }).collect();
+                for ((e,_), p) in &test_power {
+                    let i = DARK_PHOTON_NONZERO_ELEMENTS.iter().position(|dpe| *e == *dpe).unwrap();
+                    let mut file = std::fs::File::create(format!("test_power_{i}")).unwrap();
+                    for p_ in p {
+                        let p_ = p_.re;
+                        file.write(format!("{p_}\n").as_ref()).unwrap();
+                    }
+                }
+
+                let closest_freq_idx_to_0p1 = freqs.as_ref().unwrap().iter().position_min_by(|a, b| {
+                    let adist = (*a-0.1).abs();
+                    let bdist = (*b-0.1).abs();
+                    adist.partial_cmp(&bdist).unwrap()
+                }).unwrap();
+
+                println!("scaled power closest to 0.1hz ({}) = {}", freqs.as_ref().unwrap()[closest_freq_idx_to_0p1], test_power[&(DARK_PHOTON_NONZERO_ELEMENTS[0], DARK_PHOTON_NONZERO_ELEMENTS[0])][closest_freq_idx_to_0p1])
+            }
+            // let chunk_window_map = self
+            //         .theory_var
+            //         .get_chunk_window_map(test_coherence_time)
+            //         .expect("failed to get window map")
+            //         .expect("window map not present in db");
+            // let test_chunk = 20;
+            // for i in 0..5 {
+            //     let mut file = std::fs::File::create(format!("v{i}{i}")).unwrap();
+            //     for window in 0..59126 {
+            //         let p_ = chunk_window_map.get(&(test_chunk, window)).unwrap().mid.diag()[i].re;
+            //         file.write(format!("{p_}\n").as_ref()).unwrap();
+            //     }
+            // }
+            // assert!(false);
+            
             // Add along with the rest of the stationarity times
             spectra.insert(year, avg_power);
             initial_spectra_pb.inc(1)
@@ -1296,6 +1360,17 @@ impl Theory for DarkPhoton {
         // Initialize progress bar
         let interpolators_pb = ProgressBar::new(spectra.len() as u64);
         log::info!("Generating interpolators");
+
+        // TODO: debug, this was used to extract a single year/taus
+        // let kv_test = spectra.get(&test_year).unwrap();
+        // let power_for_test = kv_test.value();
+        // let test_db = rocksdb::DB::open_default("test_power").unwrap();
+        // // 2013 had no year key
+        // // test_db.put(TAU.to_le_bytes(), bincode::serialize(&power_for_test).unwrap()).unwrap();
+        // let [t0, t1, t2, t3, t4, t5, t6, t7] = TAU.to_le_bytes();
+        // let key = [t0, t1, t2, t3, t4, t5, t6, t7, (test_year-2000) as u8];
+        // test_db.put(key, bincode::serialize(&power_for_test).unwrap()).unwrap();
+        // assert!(false);
         
         let power_interpolators: DashMap<_, DashMap<_,_>> = spectra
             .par_iter()
@@ -1308,9 +1383,9 @@ impl Theory for DarkPhoton {
                             .par_iter()
                             .map(|kv_inner| {
                                 let (element_pair, power) = kv_inner.pair();
-                                let power_frequencies: Vec<f32> = power.frequencies();
+                                let power_frequencies: Vec<FloatType> = power.frequencies();
                                 let power_vec = power.power.to_vec();
-                                (element_pair.clone(), Interp1d::new_unsorted(power_frequencies, power_vec).expect("failed to construct power interpolator"))
+                                (*element_pair, Interp1d::new_sorted(power_frequencies, power_vec).expect("failed to construct power interpolator"))
                             }).collect();
                         interpolators_pb.inc(1);
                         result
@@ -1371,6 +1446,10 @@ impl Theory for DarkPhoton {
                                     let (element_pair, power) = kv_inner.pair();
                                     let (e1, e2) = element_pair;
 
+                                    // The element indices start at 1 so subtract 1
+                                    // i.e. (X1, X2, X3, X4, X5) -> (0, 1, 2, 3, 4)
+                                    let (ix, iy) = (e1.index-1, e2.index-1);
+
                                     // Get start and end seconds for this power
                                     let (power_start, power_end) = (power.start_sec, power.end_sec);
 
@@ -1386,7 +1465,7 @@ impl Theory for DarkPhoton {
 
                                     // Add contribution to chunk if there is overlap
                                     if overlap > 0 {
-                                        println!("detected overlap in chunk {chunk} of magnitude {overlap} of {coherence_time}");
+                                        log::debug!("detected overlap in chunk {chunk} of magnitude {overlap} of {coherence_time}");
 
                                         overlap_counter.fetch_add(overlap, Ordering::Relaxed);
 
@@ -1404,19 +1483,27 @@ impl Theory for DarkPhoton {
                                         let relevant_range = start_relevant..=end_relevant;
 
                                         // Interpolate power to appropriate frequencies
-                                        let frequencies_to_interpolate_to: Vec<f32> = relevant_range
-                                            .map(|i| i as f32 * frequency_bin.lower as f32)
+                                        let frequencies_to_interpolate_to: Vec<FloatType> = relevant_range
+                                            .map(|i| i as FloatType * frequency_bin.lower as FloatType)
                                             .collect();
-                                        let interpolated_power: Array1<Complex<f32>> = frequencies_to_interpolate_to
+                                        // TODO: revert checking particular chunk
+                                        if (*coherence_time == 10_198_740) & (chunk == 20) & (e1 == e2) & (*e1 == DARK_PHOTON_NONZERO_ELEMENTS[0]) {
+                                            println!("interpolating frequencies: {}..{}", frequencies_to_interpolate_to[0], frequencies_to_interpolate_to.last().unwrap());
+                                        }
+                                        let interpolated_power: Array1<Complex<FloatType>> = frequencies_to_interpolate_to
                                             .iter()
-                                            .map(|f| {
-                                                power_interpolators
-                                                    .get(&stationarity_time)
-                                                    .expect("interpolator should exist for this stationarity time")
-                                                    .get(element_pair)
-                                                    .expect("interpolator should exist for this element pair")
-                                                    .interpolate_checked(*f)
-                                                    .unwrap(/* unwrapping for now if out of bounds */)
+                                            .flat_map(|f| {
+                                                if *f <= MAX_FREQUENCY {
+                                                    Some(power_interpolators
+                                                        .get(&stationarity_time)
+                                                        .expect("interpolator should exist for this stationarity time")
+                                                        .get(element_pair)
+                                                        .expect("interpolator should exist for this element pair")
+                                                        .interpolate_checked(*f)
+                                                        .unwrap(/* unwrapping for now if out of bounds */))
+                                                } else {
+                                                    None
+                                                }
                                             }).collect();
 
                                         let num_windows = interpolated_power.len() - (2*approx_sidereal + 1) + 1;
@@ -1427,22 +1514,24 @@ impl Theory for DarkPhoton {
                                             .axis_windows(ndarray::Axis(0), 2*approx_sidereal + 1)
                                             .into_iter()
                                             .enumerate()
+                                            .par_bridge()
                                             .for_each(|(window_index, window)| {
 
                                                 // Get triplet
-                                                let low: Complex<f32> = window[0_usize].mul(overlap as f32);
-                                                let mid: Complex<f32> = window[approx_sidereal].mul(overlap as f32);
-                                                let high: Complex<f32> =  window[2*approx_sidereal].mul(overlap as f32);
+                                                let low: Complex<FloatType> = window[0_usize].mul(overlap as FloatType);
+                                                let mid: Complex<FloatType> = window[approx_sidereal].mul(overlap as FloatType);
+                                                let high: Complex<FloatType> =  window[2*approx_sidereal].mul(overlap as FloatType);
+
+                                                // TODO: revert checking particular coh/chunk
+                                                if (*coherence_time == 10_198_740) & (chunk == 20) & (window_index == 0) & (e1 == e2) & (*e1 == DARK_PHOTON_NONZERO_ELEMENTS[0]) {
+                                                    println!("test overlap for 10_198_740, 20, 0 = {overlap} x {} = {}", window[approx_sidereal], mid);
+                                                }
 
                                                 // get frequencies
                                                 // let lowf: f32 = frequencies_to_interpolate_to[window_index];
-                                                let midf: f32 = frequencies_to_interpolate_to[window_index + approx_sidereal];
+                                                let midf: FloatType = frequencies_to_interpolate_to[window_index + approx_sidereal];
                                                 // let hif: f32 = frequencies_to_interpolate_to[window_index + 2*approx_sidereal];
                                                 
-                                                // The element indices start at 1 so subtract 1
-                                                // i.e. (X1, X2, X3, X4, X5) -> (0, 1, 2, 3, 4)
-                                                let (ix, iy) = (e1.index-1, e2.index-1);
-
                                                 // Add/store triplet
                                                 inner_chunk_window_map
                                                     .entry((chunk, window_index))
@@ -1490,14 +1579,24 @@ impl Theory for DarkPhoton {
                             });
                         });
 
-                    println!("expected total overlap {coherence_time}, got {}", overlap_counter.load(Ordering::Relaxed));
+                    log::debug!("expected total overlap {coherence_time}, got {}", overlap_counter.load(Ordering::Relaxed));
                 });
 
                 // now we are just inserting into db
                 log::debug!("storing coh {coherence_time} map, with {} elements", inner_chunk_window_map.len());
-                // disk_db
-                //     .store_chunk_window_map(*coherence_time, &inner_chunk_window_map)
-                //     .expect("sigma insertion failed");
+
+                // TODO revert: checking power 
+                if *coherence_time == 10_198_740 {
+                    let test_chunk = 20;
+                    for i in 0..5 {
+                        let mut file = std::fs::File::create(format!("v{i}{i}")).unwrap();
+                        for window in 0..59126 {
+                            let p_ = inner_chunk_window_map.get(&(test_chunk, window)).unwrap().mid.diag()[i].re;
+                            file.write(format!("{p_}\n").as_ref()).unwrap();
+                        }
+                    }
+                }
+
                 inner_chunk_window_map.into_iter().for_each(|((chunk, window), triplet)| {
                     disk_db.store_chunk_window_map(*coherence_time, chunk, window, &triplet).unwrap();
                 });
@@ -1526,7 +1625,7 @@ impl Theory for DarkPhoton {
         coherence_times: usize,
         #[allow(unused)]
         stationarity: Stationarity,
-    ) -> Vec<(f32, f32)> {
+    ) -> Vec<(FloatType, FloatType)> {
 
         // Get number of seconds in the continguous subset of dataset
         let num_secs = projections_complete.num_secs();
@@ -1535,6 +1634,8 @@ impl Theory for DarkPhoton {
         
         let sz_coherence: DashMap<_, _> = set
             .into_iter()
+            // TODO: revert
+            // .filter(|(coh, _)| *coh == 10198740)
             .map(|(coherence_time, frequency_bin)| {
 
                 // Get number of chunks for this coherence time
@@ -1551,13 +1652,38 @@ impl Theory for DarkPhoton {
                         .expect("theory mean should exist for every coherence time here")
                 ).unwrap();
 
-
                 // For this coherence time, get the map to every triplet window (for sigma)
                 let chunk_window_map = self
                     .theory_var
                     .get_chunk_window_map(*coherence_time)
                     .expect("failed to get window map")
                     .expect("window map not present in db");
+
+                // // TODO: revert
+                if *coherence_time == 10198740 {
+                    let test_chunk = 20;
+                    let averaged_xii2: Array1<FloatType> = (0..59126)
+                        .map(|window| {
+                            let dv_key = [*coherence_time, test_chunk, window].map(usize::to_le_bytes).concat();
+                            let data_vector_window: DarkPhotonVec<FloatType> = bincode::deserialize(
+                                &self.data_vector
+                                .get(&dv_key)
+                                            .expect("rocks db failure")
+                                            .expect("data vector should exist for every window")
+                                    ).unwrap();
+                            data_vector_window.mid.map(|xii| xii.norm_sqr())
+                        }).fold(Array1::<FloatType>::zeros(5), |acc, x| acc + x) / 59126.0;
+                    let averaged_vii: Array1<FloatType> = (0..59126)
+                        .map(|window| {
+                            chunk_window_map.get(&(test_chunk, window)).unwrap().mid.diag().map(|v| v.re)
+                        }).fold(Array1::<FloatType>::zeros(5), |acc, x| acc + x) / 59126.0;
+                    println!("xii2 vs vii is:");
+                    println!("    {averaged_xii2}");
+                    println!("    {averaged_vii}");
+                }
+
+
+
 
                     // Step 1 and 2: calculate inverse of A_k for all chunks and windows
                     let ainv = chunk_window_map
@@ -1568,7 +1694,7 @@ impl Theory for DarkPhoton {
                             }).collect::<DashMap<_,_>>();
 
                     // Step 3: Calculate Y_k = Ainv_k * X_k for all windows in this chunk
-                    let y: DashMap<(Chunk, Window), DarkPhotonVec<f32>> = ainv
+                    let y: DashMap<(Chunk, Window), DarkPhotonVec<FloatType>> = ainv
                         .par_iter()
                         .map(|kv2| {
                             // Get triplet window and corresponding map
@@ -1576,7 +1702,7 @@ impl Theory for DarkPhoton {
                             
                             // Get data vector for this coh time, chunk, window
                             let dv_key = [*coherence_time, *chunk, *window].map(usize::to_le_bytes).concat();
-                            let data_vector_window: DarkPhotonVec<f32> = bincode::deserialize(
+                            let data_vector_window: DarkPhotonVec<FloatType> = bincode::deserialize(
                                 &self.data_vector
                                     .get(&dv_key)
                                     .expect("rocks db failure")
@@ -1584,8 +1710,8 @@ impl Theory for DarkPhoton {
                             ).expect("deser failure");
 
                             // (window, Ainv * Xk_)
-                            ((*chunk, *window), ainv_triplet.dot_vec_f32(&data_vector_window))
-                            }).collect::<DashMap<(Chunk, Window), DarkPhotonVec<f32>>>();
+                            ((*chunk, *window), ainv_triplet.dot_vec(&data_vector_window))
+                            }).collect::<DashMap<(Chunk, Window), DarkPhotonVec<FloatType>>>();
                     // Step 4: Calculate nu_ik = Ainv_k * mu_ik
                     let nu = ainv
                         .par_iter()
@@ -1611,7 +1737,7 @@ impl Theory for DarkPhoton {
                             assert_eq!(three_blocks.high.shape(), &[5, 3]);
 
                             // We take these 5x3 blocks and assemble a 15x3 matrix
-                            let nu: Array2<Complex<f32>> = Array2::from_shape_fn((15, 3), |(i, j)| { 
+                            let nu: Array2<Complex<FloatType>> = Array2::from_shape_fn((15, 3), |(i, j)| { 
                                 match i {
                                     _i if _i < 5 => three_blocks.low[[i, j]],
                                     _i if _i < 10 => three_blocks.mid[[i-5, j]],
@@ -1623,7 +1749,7 @@ impl Theory for DarkPhoton {
 
                             // Return nu with window as the key
                             ((*chunk, *window), nu)
-                        }).collect::<DashMap<_, Array2<Complex<f32>>>>();
+                        }).collect::<DashMap<_, Array2<Complex<FloatType>>>>();
 
                     // Step 5: Calculate svd of Nik
                     // Step 6: Calculate Zk = Udag_k * Y_k
@@ -1698,7 +1824,7 @@ impl Theory for DarkPhoton {
         });
 
         // Use SZ to calculate bounds
-        let freqs_and_bounds: Vec<(f32, f32)> = sz_coherence
+        let freqs_and_bounds: Vec<(FloatType, FloatType)> = sz_coherence
             .into_par_iter()
             .map(|(coherence_time, (frequency_bin, sz_chunk_window_map))| {
 
@@ -1733,7 +1859,7 @@ impl Theory for DarkPhoton {
                         let _tx2 = tx2.clone();
 
                         // Initialize vec to hold references to sz pairs for this frequency/window
-                        let mut sz_references = Vec::<&(Array1<f32>, Array1<Complex<f32>>)>::with_capacity(num_chunks);
+                        let mut sz_references = Vec::<&(Array1<FloatType>, Array1<Complex<FloatType>>)>::with_capacity(num_chunks);
                         for chunk in 0..total_chunks {
                             if let Some(reference) = sz_chunk_window_map
                             .get(&(chunk, window_idx)) {
@@ -1747,7 +1873,7 @@ impl Theory for DarkPhoton {
 
                         // Step 7: calculate likelihood, 95% bound.
                         match bound(frequency, &sz_references, tx.clone()) {
-                            Ok(eps_bound) => bounds.lock().unwrap().push((frequency as f32, eps_bound)),
+                            Ok(eps_bound) => bounds.lock().unwrap().push((frequency as FloatType, eps_bound)),
                             Err(err) => {
                                 _tx2.send((frequency, err)).unwrap();
                             }
@@ -1776,9 +1902,9 @@ fn bound(
     // only here to send via tx
     frequency: f64,
     // This collects all z and s that have the same frequency
-    sz: &[&(Array1<f32>, Array1<Complex<f32>>)],
+    sz: &[&(Array1<FloatType>, Array1<Complex<FloatType>>)],
     tx: crossbeam_channel::Sender<(f64, Vec<f64>)>,
-) -> std::result::Result<f32, BoundError> {
+) -> std::result::Result<FloatType, BoundError> {
 
     // The pdf is of the form N * sqrt(sum(...)) * prod(a exp(b))
     // so we will break down logpdf into summands 
@@ -1949,7 +2075,7 @@ fn bound(
     optimize(function, &mut upper_bound_logeps, initial_delta, target, norm, tol, max)?;
 
     // Upper bound is for logeps so exponentiate to get exp bound
-    Ok(upper_bound_logeps.exp() as f32)
+    Ok(upper_bound_logeps.exp() as FloatType)
 }
 
 fn optimize<F: Fn(f64) -> std::result::Result<f64, BoundError>>(function: F, input: &mut f64, mut delta: f64, target: f64, norm: f64, tol: f64, max: u64) -> std::result::Result<u64, BoundError> {
@@ -2070,11 +2196,11 @@ fn test_constant_on_01() {
 #[derive(Default, Serialize, Deserialize)]
 pub struct DarkPhotonMu {
     // #[serde(with = "ComplexDef")]
-    pub x: [Complex<f32>; 15],
+    pub x: [Complex<FloatType>; 15],
     // #[serde(with = "ComplexDef")]
-    pub y: [Complex<f32>; 15],
+    pub y: [Complex<FloatType>; 15],
     // #[serde(with = "ComplexDef")]
-    pub z: [Complex<f32>; 15],
+    pub z: [Complex<FloatType>; 15],
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -2097,9 +2223,9 @@ impl<T: Num + Clone> DarkPhotonVec<T> {
 
 #[derive(Default, Serialize, Deserialize, Debug, PartialEq)]
 struct DarkPhotonMuBlock {
-    block1: Array2<Complex<f32>>,
-    block2: Array2<Complex<f32>>,
-    block3: Array2<Complex<f32>>,
+    block1: Array2<Complex<FloatType>>,
+    block2: Array2<Complex<FloatType>>,
+    block3: Array2<Complex<FloatType>>,
 }
 
 // const DARK_PHOTON_MU_SHAPE: (usize, usize) = (15, 3);
@@ -2158,7 +2284,7 @@ impl DarkPhotonMu {
         DarkPhotonMuBlock { block1, block2, block3 }
     }
 
-    fn scale(&self, factor: f32) -> Self {
+    fn scale(&self, factor: FloatType) -> Self {
         Self {
             x: (&self.x).map(|entry| entry * factor),
             y: (&self.y).map(|entry| entry * factor),
@@ -2190,21 +2316,21 @@ impl DarkPhotonMu {
 fn test_to_blocks() {
     use ndarray::array;
     let dpmu = DarkPhotonMu {
-        x: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| x.into()),
-        y: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| (-x).into()),
-        z: [1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x|  I * x),
+        x: [1.0 as FloatType, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| x.into()),
+        y: [1.0 as FloatType, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x| (-x).into()),
+        z: [1.0 as FloatType, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0].map(|x|  I * x),
     };
-    let block1: Array2<Complex<f32>> = array![
-        [1.0_f32 * ONE, 2.0 * ONE, 3.0 * ONE, 4.0 * ONE, 5.0 * ONE],
-        [-1.0_f32 * ONE, -2.0 * ONE, -3.0 * ONE, -4.0 * ONE, -5.0 * ONE],
-        [1.0_f32 * I, 2.0 * I, 3.0 * I, 4.0 * I, 5.0 * I]
+    let block1: Array2<Complex<FloatType>> = array![
+        [1.0 as FloatType * ONE, 2.0 * ONE, 3.0 * ONE, 4.0 * ONE, 5.0 * ONE],
+        [-1.0 as FloatType * ONE, -2.0 * ONE, -3.0 * ONE, -4.0 * ONE, -5.0 * ONE],
+        [1.0 as FloatType * I, 2.0 * I, 3.0 * I, 4.0 * I, 5.0 * I]
     ].t().to_owned();
-    let block2: Array2<Complex<f32>> = array![
+    let block2: Array2<Complex<FloatType>> = array![
         [6.0 * ONE, 7.0 * ONE, 8.0 * ONE, 9.0 * ONE, 10.0 * ONE],
         [-6.0 * ONE, -7.0 * ONE, -8.0 * ONE, -9.0 * ONE, -10.0 * ONE],
         [6.0 * I, 7.0 * I, 8.0 * I, 9.0 * I, 10.0 * I]
     ].t().to_owned();
-    let block3: Array2<Complex<f32>> = array![
+    let block3: Array2<Complex<FloatType>> = array![
         [11.0 * ONE, 12.0 * ONE, 13.0 * ONE, 14.0 * ONE, 15.0 * ONE],
         [-11.0 * ONE, -12.0 * ONE, -13.0 * ONE, -14.0 * ONE, -15.0 * ONE],
         [11.0 * I, 12.0 * I, 13.0 * I, 14.0 * I, 15.0 * I]
@@ -2240,8 +2366,8 @@ fn test_overlap() {
 /// This doesn't necessarily need to be parallelized because this is done per coherence chunk, which is parallelized.
 /// Thus, no further delegation is necessary (likely).
 fn dark_photon_auxiliary_values(
-    weights_n: &DashMap<StationName, f32>,
-    weights_e: &DashMap<StationName, f32>,
+    weights_n: &DashMap<StationName, FloatType>,
+    weights_e: &DashMap<StationName, FloatType>,
     weights_wn: &TimeSeries,
     weights_we: &TimeSeries,
     valid_entry_map: &DashMap<StationName, Array1<bool>>,
@@ -2258,7 +2384,7 @@ fn dark_photon_auxiliary_values(
         // Here we iterate thrhough weights_n and not chunk_dataset because
         // stations in weight_n are a subset (filtered) of those in chunk_dataset.
         // Could perhaps save memory by dropping coressponding invalid datasets in chunk_dataset.
-        let mut auxiliary_value_series_unnormalized: Array1<f32> = Array1::zeros(weights_wn.len());
+        let mut auxiliary_value_series_unnormalized: TimeSeries = Array1::zeros(weights_wn.len());
 
         for key_value in weights_n.iter() {
             // .map(|key_value| -> Array1<f32> { {
@@ -2276,31 +2402,31 @@ fn dark_photon_auxiliary_values(
             let auxiliary_value = match i {
                 
                 // H1 summand = wn * cos(phi)^2
-                1 => (sc.longitude.cos().powi(2) as f32).mul(*weights_n.get(station_name).unwrap()),
+                1 => (sc.longitude.cos().powi(2) as FloatType).mul(*weights_n.get(station_name).unwrap()),
 
                 // H2 summand = wn * sin(phi) * cos(phi)
-                2 => ((sc.longitude.sin() * sc.longitude.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
+                2 => ((sc.longitude.sin() * sc.longitude.cos()) as FloatType).mul(*weights_n.get(station_name).unwrap()),
 
                 // H3 summand = we * cos(polar)^2
-                3 => (sc.polar.cos().powi(2) as f32).mul(*weights_e.get(station_name).unwrap()),
+                3 => (sc.polar.cos().powi(2) as FloatType).mul(*weights_e.get(station_name).unwrap()),
 
                 // H4 summand = we * cos(phi)^2 * cos(polar)^2
-                4 => ((sc.longitude.cos().powi(2) * sc.polar.cos().powi(2)) as f32).mul(*weights_n.get(station_name).unwrap()),
+                4 => ((sc.longitude.cos().powi(2) * sc.polar.cos().powi(2)) as FloatType).mul(*weights_n.get(station_name).unwrap()),
 
                 // H5 summand = we * sin(phi) * cos(phi) * cos(polar)^2
-                5 => ((sc.longitude.sin() * sc.longitude.cos() * sc.polar.cos().powi(2)) as f32)
+                5 => ((sc.longitude.sin() * sc.longitude.cos() * sc.polar.cos().powi(2)) as FloatType)
                     .mul(*weights_n.get(station_name).unwrap()),
 
                 // H6 summand = we * cos(phi) * sin(polar) * cos(polar)
-                6 => ((sc.longitude.cos() * sc.polar.sin() * sc.polar.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
+                6 => ((sc.longitude.cos() * sc.polar.sin() * sc.polar.cos()) as FloatType).mul(*weights_n.get(station_name).unwrap()),
 
                 // H7 summand = we * sin(phi) * sin(polar) * cos(polar)
-                7 => ((sc.longitude.sin() * sc.polar.sin() * sc.polar.cos()) as f32).mul(*weights_n.get(station_name).unwrap()),
+                7 => ((sc.longitude.sin() * sc.polar.sin() * sc.polar.cos()) as FloatType).mul(*weights_n.get(station_name).unwrap()),
                 
                 _ => unreachable!("hardcoded to iterate from 1 to 7"),
             };
 
-            let station_series: Array1<f32> = (*valid_entry_map.get(station_name).expect("station should exist")).map(|flag| if *flag { 1.0 } else { 0.0 }) * auxiliary_value;
+            let station_series: Array1<FloatType> = (*valid_entry_map.get(station_name).expect("station should exist")).map(|flag| if *flag { 1.0 } else { 0.0 }) * auxiliary_value;
             auxiliary_value_series_unnormalized.add_assign(&station_series);
         }
 
@@ -2343,7 +2469,7 @@ fn test_num_windows() {
 
 #[derive(Serialize, Deserialize)]
 pub struct Power<T: Num + Clone> {
-    power: Array1<Complex<T>>,
+    pub power: Array1<Complex<T>>,
     start_sec: usize,
     end_sec: usize,
 }
@@ -2351,14 +2477,14 @@ pub struct Power<T: Num + Clone> {
 #[derive(Serialize, Deserialize, PartialEq, Clone, Debug)]
 /// Note: these should all be 5x5 arrays
 pub struct Triplet {
-    pub low: Array2<Complex<f32>>,
-    pub mid: Array2<Complex<f32>>,
-    pub high: Array2<Complex<f32>>,
-    pub midf: f32,
+    pub low: Array2<Complex<FloatType>>,
+    pub mid: Array2<Complex<FloatType>>,
+    pub high: Array2<Complex<FloatType>>,
+    pub midf: FloatType,
 }
 
 impl Triplet {
-    fn mat_mul(&self, arrays: [Array2<Complex<f32>>; 3]) -> Triplet {
+    fn mat_mul(&self, arrays: [Array2<Complex<FloatType>>; 3]) -> Triplet {
         Triplet {
             low: self.low.dot(&arrays[0]),
             mid: self.mid.dot(&arrays[1]),
@@ -2374,7 +2500,7 @@ impl Triplet {
 
     /// This takes the [Triplet] self and multipled a [DarkPhotonVec] to produce another [DarkPhotonVec]
     /// via matrix multiplication, i.e. A.x = y
-    fn dot_vec_f32(&self, vecs: &DarkPhotonVec<f32>) -> DarkPhotonVec<f32> {
+    fn dot_vec(&self, vecs: &DarkPhotonVec<FloatType>) -> DarkPhotonVec<FloatType> {
         DarkPhotonVec {
             low: self.low.dot(&vecs.low),
             mid: self.mid.dot(&vecs.mid),
@@ -2476,11 +2602,8 @@ impl<T: Float> Power<T>
         }
     }
     // TODO: ensure this is returning the right frequencies
-    fn frequencies(&self) ->  Vec<f32> {
-        get_frequency_range_1s(TAU.try_into().expect("usize to i64 failed"))
-            .into_iter()
-            .map(|double| double.to_f32().expect("double to single precision failed"))
-            .collect()
+    fn frequencies(&self) ->  Vec<FloatType> {
+        get_frequency_range_1s(2*TAU)
     }
 }
 

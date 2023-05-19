@@ -7,6 +7,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 use crate::constants::SECONDS_PER_DAY;
+use crate::FloatType;
 
 use super::loader::{day_since_first, StationName};
 
@@ -148,7 +149,11 @@ const fn convert_entry_year_to_sec(year: usize) -> usize {
 }
 
 #[inline(always)]
-pub(crate) fn apply_rotation(f1: f32, f2: f32, theta: f32) -> (f32, f32) {
+pub(crate) fn apply_rotation(
+    f1: FloatType,
+    f2: FloatType,
+    theta: FloatType,
+) -> (FloatType, FloatType) {
     let (sin, cos) = theta.sin_cos();
     (f1 * cos - f2 * sin, f1 * sin + f2 * cos)
 }

@@ -1,6 +1,7 @@
 use std::{error::Error, path::Path};
 
 use dashmap::DashMap;
+use rayon::prelude::{ParallelBridge, ParallelIterator};
 use rocksdb::{DBWithThreadMode, MultiThreaded, Options};
 
 use crate::theory::dark_photon::{InnerVarChunkWindowMap, Triplet};
@@ -25,14 +26,25 @@ impl DiskDB {
         Ok(DiskDB { db })
     }
 
+    pub(crate) fn clear(&self) {
+        self.db
+            .iterator(rocksdb::IteratorMode::Start)
+            .map(|x| x.unwrap())
+            .par_bridge()
+            .for_each(|(key, _)| {
+                drop(self.db.delete(key));
+            });
+    }
+
     pub(crate) fn get_chunk_window_map(
         &self,
         coherence_time: usize,
     ) -> Result<Option<InnerVarChunkWindowMap>> {
         let map = self
             .db
-            .iterator(rocksdb::IteratorMode::Start)
+            .prefix_iterator(coherence_time.to_le_bytes())
             .map(|value| value.expect("rocksdb read error"))
+            .par_bridge()
             .flat_map(|(key, value)| {
                 let read_coherence_time = usize::from_le_bytes(key[..8].try_into().unwrap());
                 if coherence_time == read_coherence_time {
@@ -45,6 +57,7 @@ impl DiskDB {
                 }
             })
             .collect::<DashMap<_, _>>();
+
         Ok(if map.len() == 0 { None } else { Some(map) })
     }
 

@@ -3,7 +3,7 @@ use plotters::prelude::*;
 use std::fs::File;
 use std::io::Read;
 use std::sync::Arc;
-use supermag_analysis::weights::ProjectionsComplete;
+use supermag_analysis::{weights::ProjectionsComplete, FloatType};
 use sysinfo::{System, SystemExt};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -26,7 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut len = 0;
     let (min, max) = projections_complete.projections_complete.iter().fold(
-        (0.0_f32, 0.0_f32),
+        (0.0 as FloatType, 0.0 as FloatType),
         |(mut min, mut max), element| {
             let MinMaxResult::MinMax(&element_min, &element_max) = element.iter().minmax() else {
             unreachable!()

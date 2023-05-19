@@ -4,7 +4,7 @@ use plotters::prelude::*;
 use rocksdb::DB;
 use statrs::distribution::ContinuousCDF;
 
-const OUT_FILE_NAME: &str = "szhist.png";
+const OUT_FILE_NAME: &str = "szhist_2.png";
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = BitMapBackend::new(OUT_FILE_NAME, (640, 480)).into_drawing_area();
 
@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .x_label_area_size(35)
         .y_label_area_size(40)
         .margin(5)
-        .caption("Histogram Test", ("sans-serif", 50.0))
+        .caption("CDF of z", ("sans-serif", 50.0))
         .build_cartesian_2d(-2.5f32..2.5f32, 0f32..1f32)?;
 
     z_chart
@@ -35,16 +35,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //     .map(|x: Complex<f32>| x.re)
     //     // .inspect(|z| println!("{z}"))
     //     .collect();
+    // let mut z: Vec<f32> = (0..59126)
+    //     .map(|window_index| {
+    //         let key = [10198740_usize, 20_usize, window_index]
+    //             // let key = [8541288_usize, 10_usize, window_index]
+    //             .map(usize::to_le_bytes)
+    //             .concat();
+    //         bincode::deserialize::<Array1<Complex<f32>>>(&zdb.get(key).unwrap().unwrap())
+    //             .unwrap()
+    //             .map(|z| z.re)
+    //     })
+    //     .flatten()
+    //     .collect();
     let mut z: Vec<f32> = (0..59126)
         .map(|window_index| {
-            let key = [10198740_usize, 20_usize, window_index]
+            let key = [10_198_740_usize, 20_usize, window_index]
+                // let key = [8541288_usize, 10_usize, window_index]
                 .map(usize::to_le_bytes)
                 .concat();
-            bincode::deserialize::<Array1<Complex<f32>>>(&zdb.get(key).unwrap().unwrap())
-                .unwrap()
-                .map(|z| z.re)
+            bincode::deserialize::<Array1<Complex<f32>>>(&zdb.get(key).unwrap().unwrap()).unwrap()
+                [2]
+            .re
         })
-        .flatten()
         .collect();
     z.sort_unstable_by(|a, b| a.partial_cmp(&b).unwrap());
     let cdfz: Vec<f32> = (1..=z.len()).map(|i| i as f32 / z.len() as f32).collect();
@@ -62,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         RED.mix(0.8).filled(),
     ))?;
 
-    let normal = statrs::distribution::Normal::new(0.0, 1.0 / 2.0_f64.powf(3.0 / 2.0)).unwrap();
+    let normal = statrs::distribution::Normal::new(0.0, 0.33 / 2.0_f64.sqrt()).unwrap();
     z_chart.draw_series(LineSeries::new(
         z.into_iter().map(|z| (z, normal.cdf(z as f64) as f32)),
         GREEN.mix(0.8).filled(),

@@ -1,6 +1,6 @@
 use super::igrf_decl::{apply_rotation, shift_point, IGRF_DATA_INTERPOLATOR};
-use crate::constants::*;
 use crate::utils::coordinates::*;
+use crate::{constants::*, FloatType, TimeSeries};
 use anyhow::Result;
 use dashmap::DashMap;
 use glob::glob;
@@ -13,7 +13,6 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::sync::Arc;
 
-pub type TimeSeries = Array1<f32>;
 pub type Index = usize;
 pub type Year = usize;
 pub type StationName = String;
@@ -137,37 +136,47 @@ impl YearlyDatasetLoader {
                 }
 
                 // Break up buffer into expected_size chunks
-                let mut field_1: Array1<f32> = Array1::from_vec(if single {
-                    buffer[HEADER_SIZE..HEADER_SIZE + expected_size].to_f32()
+                let mut field_1: TimeSeries = Array1::from_vec(if single {
+                    buffer[HEADER_SIZE..HEADER_SIZE + expected_size]
+                        .to_f32()
+                        .into_iter()
+                        .map(|x| x as FloatType)
+                        .collect()
                 } else {
                     buffer[HEADER_SIZE..HEADER_SIZE + expected_size]
                         .to_f64()
                         .into_iter()
-                        .map(|x| x as f32)
+                        .map(|x| x as FloatType)
                         .collect()
                 });
-                let mut field_2: Array1<f32> = Array1::from_vec(if single {
+                let mut field_2: TimeSeries = Array1::from_vec(if single {
                     buffer[HEADER_SIZE + BUFFER_SIZE + expected_size
                         ..HEADER_SIZE + BUFFER_SIZE + 2 * expected_size]
                         .to_f32()
+                        .into_iter()
+                        .map(|x| x as FloatType)
+                        .collect()
                 } else {
                     buffer[HEADER_SIZE + BUFFER_SIZE + expected_size
                         ..HEADER_SIZE + BUFFER_SIZE + 2 * expected_size]
                         .to_f64()
                         .into_iter()
-                        .map(|x| x as f32)
+                        .map(|x| x as FloatType)
                         .collect()
                 });
-                let field_3: Array1<f32> = Array1::from_vec(if single {
+                let field_3: TimeSeries = Array1::from_vec(if single {
                     buffer[HEADER_SIZE + 2 * BUFFER_SIZE + 2 * expected_size
                         ..HEADER_SIZE + 2 * BUFFER_SIZE + 3 * expected_size]
                         .to_f32()
+                        .into_iter()
+                        .map(|x| x as FloatType)
+                        .collect()
                 } else {
                     buffer[HEADER_SIZE + 2 * BUFFER_SIZE + 2 * expected_size
                         ..HEADER_SIZE + 2 * BUFFER_SIZE + 3 * expected_size]
                         .to_f64()
                         .into_iter()
-                        .map(|x| x as f32)
+                        .map(|x| x as FloatType)
                         .collect()
                 });
 
@@ -213,14 +222,15 @@ impl YearlyDatasetLoader {
                         // Apply rotations
                         assert!(!f1.is_nan(), "f1 is nan");
                         assert!(!f2.is_nan(), "f2 is nan");
-                        let (f1_, f2_) = if f1 == SUPERMAG_NAN || f2 == SUPERMAG_NAN {
-                            (SUPERMAG_NAN, SUPERMAG_NAN)
+                        // these should be f32
+                        let (f1_, f2_) = if f1 as f32 == SUPERMAG_NAN || f2 as f32 == SUPERMAG_NAN {
+                            (SUPERMAG_NAN as FloatType, SUPERMAG_NAN as FloatType)
                         } else {
-                            apply_rotation(f1, f2, sec_declination as f32)
+                            apply_rotation(f1, f2, sec_declination as FloatType)
                         };
                         assert!(!f1_.is_nan(), "rotated f1 is nan");
                         assert!(!f2_.is_nan(), "rotated f2 is nan");
-                        (f1_, f2_)
+                        (f1_ as FloatType, f2_ as FloatType)
                     })
                     .unzip()
                 {

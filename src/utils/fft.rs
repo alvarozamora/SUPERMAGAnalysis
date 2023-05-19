@@ -19,15 +19,18 @@
 //     }
 // }
 
-pub(crate) fn get_frequency_range_1s(domain_size_in_seconds: i64) -> Vec<f32> {
+use crate::FloatType;
+
+pub(crate) fn get_frequency_range_1s(domain_size_in_seconds: usize) -> Vec<FloatType> {
     // hardcoded 1s spacing
-    const ONE_SECOND_SPACING: f32 = 1.0;
+    const ONE_SECOND_SPACING: FloatType = 1.0;
 
     // Calculate foruier grid spacing
-    let fourier_grid_spacing: f32 = 1.0 / (domain_size_in_seconds as f32 * ONE_SECOND_SPACING);
+    let fourier_grid_spacing: FloatType =
+        1.0 / (domain_size_in_seconds as FloatType * ONE_SECOND_SPACING);
 
     // Calculate integer multiples of fourier grid spacing
     (0..domain_size_in_seconds)
-        .map(|index| index as f32 * fourier_grid_spacing)
+        .map(|index| index as FloatType * fourier_grid_spacing)
         .collect()
 }

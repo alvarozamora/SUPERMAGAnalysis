@@ -12,7 +12,7 @@ fn main() {
     //     .filter_level(log::LevelFilter::Debug)
     //     .init();
     rayon::ThreadPoolBuilder::new()
-        .num_threads(8)
+        .num_threads(10)
         .build_global()
         .unwrap();
     simple_logging::log_to_file("analysis.log", log::LevelFilter::Trace).unwrap();

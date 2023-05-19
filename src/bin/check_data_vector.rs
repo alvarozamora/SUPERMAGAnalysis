@@ -15,6 +15,7 @@ use supermag_analysis::utils::async_balancer::Balancer;
 use supermag_analysis::weights::{
     coherence_times, frequencies_from_coherence_times, Analysis, ProjectionsComplete, Stationarity,
 };
+use supermag_analysis::FloatType;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize Theory
@@ -35,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let check_chunk = 20_usize;
     let start_chunk = check_chunk * check_coherence;
     let end_chunk = (check_chunk + 1) * check_coherence;
-    let mut subseries: Array1<Complex<f32>> = first_series
+    let mut subseries: Array1<Complex<FloatType>> = first_series
         .slice(s![start_chunk..end_chunk])
         .map(|x| x.into());
 

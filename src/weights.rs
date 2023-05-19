@@ -3,7 +3,7 @@ use crate::{
     utils::*,
     utils::loader::*,
     utils::async_balancer::*,
-    theory::*,
+    theory::*, FloatType, StationName, Weight, TimeSeries
 };
 use ndarray::{s, Array1};
 use dashmap::DashMap;
@@ -20,11 +20,6 @@ use mpi::{
     point_to_point::{Source, Destination},
 };
 
-
-type Index = usize;
-type Weight = f32;
-type StationName = String;
-type TimeSeries = Array1<f32>;
 
 #[derive(Clone, PartialEq, Debug)]
 pub struct FrequencyBin {
@@ -168,8 +163,8 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
                     log::trace!("Initializing weights with size {dataset_length}");
                     let local_hashmap_n: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
                     let local_hashmap_e: DashMap<StationName, Weight> = DashMap::with_capacity(datasets.len());
-                    let local_wn: Arc<Mutex<TimeSeries>> = Arc::new(Mutex::new(Array1::from_vec(vec![0.0_f32; dataset_length])));
-                    let local_we: Arc<Mutex<TimeSeries>> = Arc::new(Mutex::new(Array1::from_vec(vec![0.0_f32; dataset_length])));
+                    let local_wn: Arc<Mutex<TimeSeries>> = Arc::new(Mutex::new(Array1::from_vec(vec![0.0; dataset_length])));
+                    let local_we: Arc<Mutex<TimeSeries>> = Arc::new(Mutex::new(Array1::from_vec(vec![0.0; dataset_length])));
                     log::trace!("Initialized weights with size {dataset_length}");
 
                     let num_entries: Mutex<Array1<usize>> = Mutex::new(Array1::from_vec(vec![0; dataset_length]));
@@ -704,11 +699,9 @@ impl<T: Theory + Send + Sync + 'static> Analysis<T> {
         log::debug!("finished bounds");
         
 
-        let mut bounds_string = String::new();
         for (freq, bound) in bounds {
-            bounds_string.push_str(&format!("{freq} {bound}\n")); 
+            bounds_file.write_all(format!("{freq} {bound}\n").as_bytes()).expect("i/o error"); 
         }
-        bounds_file.write_all(bounds_string.as_ref()).expect("i/o error");
 
         Ok(())
     }
@@ -908,7 +901,7 @@ async fn calculate_weights_for_chunk(
             log::trace!("calculating weights for station {station}");
 
             // Valid samples. THIS ASSUMES ALL FIELDS HAVE THE SAME VALID ENTRIES
-            let num_samples: usize = dataset.field_1.fold(0, |acc, &x| if x != SUPERMAG_NAN && !x.is_nan() { acc + 1 } else { acc } );
+            let num_samples: usize = dataset.field_1.fold(0, |acc, &x| if x as f32 != SUPERMAG_NAN && !x.is_nan() { acc + 1 } else { acc } );
 
             // If there are no valid entries, abort. Do not clean, and do not modify dashmap
             if num_samples == 0 {
@@ -920,17 +913,17 @@ async fn calculate_weights_for_chunk(
             // NOTE: field_1 is flipped here to be negative because polar unit vector points south,
             // i.e. B_polar = -B_north
             let (valid_entries_1, clean_field_1): (Array1<bool>, TimeSeries) = {
-                let (entries, field): (Vec<bool>, Vec<f32>) = dataset.field_1
+                let (entries, field): (Vec<bool>, Vec<FloatType>) = dataset.field_1
                     .iter()
-                    .map(|&x| if x != SUPERMAG_NAN && !x.is_nan() { (true, -x) } else { (false, 0.0) })
+                    .map(|&x| if x as f32 != SUPERMAG_NAN && !x.is_nan() { (true, -x as FloatType) } else { (false, 0.0) })
                     .unzip();
                 (Array1::from_vec(entries), Array1::from_vec(field)) 
             };
             log::trace!("cleaned field 1");
             let (valid_entries_2, clean_field_2): (Array1<bool>, TimeSeries) = {
-                let (entries, field): (Vec<bool>, Vec<f32>) = dataset.field_2
+                let (entries, field): (Vec<bool>, Vec<FloatType>) = dataset.field_2
                     .iter()
-                    .map(|&x| if x != SUPERMAG_NAN && !x.is_nan(){ (true, x) } else { (false, 0.0) })
+                    .map(|&x| if x as f32 != SUPERMAG_NAN && !x.is_nan(){ (true, x) } else { (false, 0.0) })
                     .unzip();
                 (Array1::from_vec(entries), Array1::from_vec(field)) 
             };
@@ -980,13 +973,13 @@ async fn calculate_weights_for_chunk(
 
             // Calculate weights
             log::trace!("dotting fields 1, which has length and {}", clean_field_1.len());
-            // let n_weight: f32 = (clean_field_1.fold(0.0, |s, f| s + f * f) / num_samples as f32).recip();
-            let n_weight: f32 = (clean_field_1.dot(&clean_field_1) / num_samples as f32).recip();
+            // let n_weight: FloatType = (clean_field_1.fold(0.0, |s, f| s + f * f) / num_samples as FloatType).recip();
+            let n_weight: FloatType = (clean_field_1.dot(&clean_field_1) / num_samples as FloatType).recip();
             assert!(!n_weight.is_nan(), "n_weight is nan");
 
             log::trace!("dotting fields 2, which has length and {}", clean_field_2.len());
-            // let e_weight: f32 = (clean_field_2.fold(0.0, |s, f| s + f * f) / num_samples as f32).recip();
-            let e_weight: f32 = (clean_field_2.dot(&clean_field_2) / num_samples as f32).recip();
+            // let e_weight: FloatType = (clean_field_2.fold(0.0, |s, f| s + f * f) / num_samples as FloatType).recip();
+            let e_weight: FloatType = (clean_field_2.dot(&clean_field_2) / num_samples as FloatType).recip();
             assert!(!e_weight.is_nan(), "e_weight is nan");
 
             log::trace!("calculating wn/we time series");

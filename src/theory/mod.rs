@@ -8,6 +8,7 @@ use crate::{
     utils::{coordinates::construct_coordinate_map, loader::Dataset},
     weights::FrequencyBin,
 };
+use crate::{FloatType, TimeSeries};
 use dashmap::DashMap;
 use ndarray::Array1;
 use num_complex::Complex;
@@ -19,26 +20,24 @@ use std::collections::HashSet;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-const NULL: f32 = 0.0;
-const I: Complex<f32> = Complex::new(0.0, 1.0);
+const NULL: FloatType = 0.0;
+const I: Complex<FloatType> = Complex::new(0.0, 1.0);
 
 pub type Degree = i64;
 pub type Order = i64;
-pub type Angle = f32;
+pub type Angle = FloatType;
 pub type Theta = Angle;
 pub type Phi = Angle;
-pub type PhiLM = [Complex<f32>; 2];
+pub type PhiLM = [Complex<FloatType>; 2];
 pub type StationName = String;
 pub type VecSphFn = Arc<dyn Fn(Theta, Phi) -> VecSph + 'static + Send + Sync>;
-pub type TimeSeries = Array1<f32>;
-pub type Series = Array1<f32>;
 pub type DataVector = DashMap<NonzeroElement, TimeSeries>;
 pub type Modes = Vec<Mode>;
 pub type NonzeroElements = Vec<NonzeroElement>;
 pub type Real = bool;
-pub type Frequency = f32;
+pub type Frequency = FloatType;
 pub type FrequencyIndex = usize;
-pub type DFTValue = Complex<f32>;
+pub type DFTValue = Complex<FloatType>;
 
 pub trait FromChunkMap: Sized {
     fn from_chunk_map(
@@ -69,8 +68,8 @@ pub trait Theory: Send {
     /// stations into a smaller subset of time series, weighted by their noise.
     fn calculate_projections(
         &self,
-        weights_n: &DashMap<StationName, f32>,
-        weights_e: &DashMap<StationName, f32>,
+        weights_n: &DashMap<StationName, FloatType>,
+        weights_e: &DashMap<StationName, FloatType>,
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
         chunk_dataset: &DashMap<StationName, Dataset>,
@@ -80,8 +79,8 @@ pub trait Theory: Send {
     /// any auxiliary values are calculated while the raw data is loaded in memory.
     fn calculate_auxiliary_values(
         &self,
-        weights_n: &DashMap<StationName, f32>,
-        weights_e: &DashMap<StationName, f32>,
+        weights_n: &DashMap<StationName, FloatType>,
+        weights_e: &DashMap<StationName, FloatType>,
         weights_wn: &TimeSeries,
         weights_we: &TimeSeries,
         chunk_dataset: &DashMap<StationName, Dataset>,
@@ -126,7 +125,7 @@ pub trait Theory: Send {
         projections_complete: &ProjectionsComplete,
         coherence_times: usize,
         stationarity: Stationarity,
-    ) -> Vec<(f32, f32)>;
+    ) -> Vec<(FloatType, FloatType)>;
 }
 
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,13 +203,13 @@ pub enum Component {
 #[derive(Debug)]
 pub struct VecSph {
     // This is Y_lm * r_hat. Only the non-zero component is returned (radial).
-    pub y: Complex<f32>,
+    pub y: Complex<FloatType>,
 
     // This is |vec(r)| * grad(Y_lm). Only the nonzero components are returned (angular components)
-    pub psi: [Complex<f32>; 2],
+    pub psi: [Complex<FloatType>; 2],
 
     // This is vec(r) x grad(Y_lm). Only the nonzero components are returned (angular components)
-    pub phi: [Complex<f32>; 2],
+    pub phi: [Complex<FloatType>; 2],
 }
 
 /// This returns a lookup table of vector spherical harmonic functions for a given set of modes.
@@ -235,18 +234,20 @@ pub fn vector_spherical_harmonic(mode: Mode) -> VecSphFn {
     Arc::new(move |theta: Theta, phi: Phi| -> VecSph {
         // Set up spherical harmonic calculation
         let sh = ComplexSHType::Spherical;
-        let p: SphrsCoordinates<f32> = SphrsCoordinates::spherical(NULL, theta, phi);
+        let p: SphrsCoordinates<FloatType> = SphrsCoordinates::spherical(NULL, theta, phi);
 
         // Calculate Y_lm
         let y = sh.eval(l, m, &p);
 
         // Calculate components of psi_lm and phi_lm
-        let a = (m as f32) * theta.tan().recip() * y
-            + (sqrt(gamma((1 + l - m) as f32))
-                * sqrt(gamma((2 + l + m) as f32))
+        let a = (m as FloatType) * theta.tan().recip() * y
+            + (sqrt(gamma((1 + l - m) as FloatType))
+                * sqrt(gamma((2 + l + m) as FloatType))
                 * sh.eval(l, m + 1, &p))
-                / ((I * phi).exp() * sqrt(gamma((l - m) as f32)) * sqrt(gamma((1 + l + m) as f32)));
-        let b = I * m as f32 * theta.sin().recip() * y;
+                / ((I * phi).exp()
+                    * sqrt(gamma((l - m) as FloatType))
+                    * sqrt(gamma((1 + l + m) as FloatType)));
+        let b = I * m as FloatType * theta.sin().recip() * y;
 
         // Consruct psi_lm and phi_lm
         let psi = [a, b];
@@ -256,9 +257,9 @@ pub fn vector_spherical_harmonic(mode: Mode) -> VecSphFn {
     })
 }
 
-fn gamma(x: f32) -> f32 {
+fn gamma(x: FloatType) -> FloatType {
     x.gamma()
 }
-fn sqrt(x: f32) -> f32 {
+fn sqrt(x: FloatType) -> FloatType {
     x.sqrt()
 }
