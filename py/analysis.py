@@ -84,7 +84,6 @@ if __name__ == "__main__":
             # 1) construct DFT kernels
             # 2) load H_i and add their DFT contributions to mux, muy, muz
             mux = np.zeros(15) + 0j
-            mux_prefactor = PI * R * sqrt(2.0 * RHO) / 4.0
             muy = np.zeros(15) + 0j
             muz = np.zeros(15) + 0j
 
@@ -234,6 +233,14 @@ if __name__ == "__main__":
             muz[12] = np.sum(cis_fh * h6)
             muz[13] = -np.sum(cis_fh * h7)
             muz[14] = np.sum(cis_fh * (1 - h3))
+
+            # Multiply by prefactors
+            mux_prefactor = PI * R * sqrt(2.0 * RHO) / 4.0
+            muy_prefactor = - mux_prefactor
+            muz_prefactor = 2 * mux_prefactor
+            mux *= mux_prefactor
+            muy *= muy_prefactor
+            muz *= muz_prefactor
 
             # STEP 3: Theory Var
             # a) Load in overlapping stationarity times
