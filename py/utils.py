@@ -12,6 +12,9 @@ I_MIN = int(INV_VEL_SQ / (1.0 + THRESHOLD))
 # Number of seconds in a sidereal day
 SIDEREAL_DAY_SECONDS = 86164.0905
 
+# Sidereal frequency
+FD = 1.0 / SIDEREAL_DAY_SECONDS
+
 
 def coherence_times(total_time):
     """
