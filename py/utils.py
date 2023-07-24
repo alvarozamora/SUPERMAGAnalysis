@@ -15,6 +15,9 @@ SIDEREAL_DAY_SECONDS = 86164.0905
 # Sidereal frequency
 FD = 1.0 / SIDEREAL_DAY_SECONDS
 
+# Directory where X and H data lives
+NPY_DIRECTORY = "proj_aux_np"
+
 
 def coherence_times(total_time):
     """
@@ -130,3 +133,7 @@ def approximate_sidereal(df: float):
         return multiple
     else:
         return multiple + 1
+
+
+def calculate_stationarity_chunks(num_chunks, chunk_size, chunk_mod):
+    return [(k * chunk_size + min(k, chunk_mod), (k + 1) * chunk_size + min(k + 1, chunk_mod)) for k in range(num_chunks)]

@@ -1,5 +1,5 @@
 import unittest
-from utils import maxprime, coherence_times, frequencies_from_coherence_times, approximate_sidereal, SIDEREAL_DAY_SECONDS
+from utils import maxprime, coherence_times, frequencies_from_coherence_times, approximate_sidereal, SIDEREAL_DAY_SECONDS, calculate_stationarity_chunks
 
 
 class TestMaxPrime(unittest.TestCase):
@@ -50,6 +50,72 @@ class TestSidereal(unittest.TestCase):
                 1.0 / (SIDEREAL_DAY_SECONDS + 1) / i), i)
             self.assertEqual(approximate_sidereal(
                 1.0 / (SIDEREAL_DAY_SECONDS - 1) / i), i)
+
+
+class TestStationarityChunks(unittest.TestCase):
+
+    def test_stationarity_chunks_neatly_divisible(self):
+        TEST_TAU = 8
+        TEST_TIME = 32
+        num_chunks = TEST_TIME // TEST_TAU
+        chunk_size = TEST_TIME // num_chunks
+        chunk_mod = TEST_TIME % num_chunks
+
+        # Neatly divisible into TAU chunks
+        expected = [
+            (0, 8),  # 8
+            (8, 16),  # 8
+            (16, 24),  # 8
+            (24, 32),  # 8
+        ]
+
+        result = calculate_stationarity_chunks(
+            num_chunks, chunk_size, chunk_mod)
+
+        assert result == expected
+
+    def test_stationarity_chunks_even_extra(self):
+        TEST_TAU = 8
+        TEST_TIME = 36
+        num_chunks = TEST_TIME // TEST_TAU
+        chunk_size = TEST_TIME // num_chunks
+        chunk_mod = TEST_TIME % num_chunks
+
+        # Not neatly divisible into TAU chunks
+        # These should all have one extra over neatly divisible case
+        expected = [
+            (0, 9),  # 9
+            (9, 18),  # 9
+            (18, 27),  # 9
+            (27, 36),  # 9
+        ]
+
+        result = calculate_stationarity_chunks(
+            num_chunks, chunk_size, chunk_mod)
+
+        assert result == expected, "failed even extra case"
+
+    def test_stationarity_chunks_uneven_extra(self):
+        TEST_TAU = 8
+        TEST_TIME = 38
+        num_chunks = TEST_TIME // TEST_TAU
+        chunk_size = TEST_TIME // num_chunks
+        chunk_mod = TEST_TIME % num_chunks
+
+        # Not neatly divisible into TAU chunks
+        # First two should have a two extra
+        # Last two should have one extra
+        expected = [
+            (0, 10),  # 10
+            (10, 20),  # 10
+            (20, 29),  # 9
+            (29, 38),  # 9
+        ]
+
+        result = calculate_stationarity_chunks(
+            num_chunks, chunk_size, chunk_mod)
+
+        assert result == expected, "failed uneven extra case"
 
 
 if __name__ == '__main__':
