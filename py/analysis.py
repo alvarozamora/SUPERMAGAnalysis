@@ -9,6 +9,9 @@ from numpy import pi as PI, sqrt
 from utils import coherence_times, frequencies_from_coherence_times, approximate_sidereal, FD, NPY_DIRECTORY
 from power import STATIONARITY_TIME, SPECTRA_FREQS, TAU, find_overlap_chunks, get_stationarity_chunk_dir
 from bound import calculate_bounds
+from time import time
+from tqdm import tqdm
+import threading
 
 RHO = 6.04e7
 R = 0.0212751
@@ -28,8 +31,11 @@ if __name__ == "__main__":
     coherence_times = coherence_times(TIME_2003_TO_2020)
     freq_bins = frequencies_from_coherence_times(coherence_times)
 
-    for (coh, (lof, hif_inclusive, df)) in zip(coherence_times, freq_bins):
-        print(f"Working on coherence time {coh}")
+    pb = tqdm(zip(coherence_times, freq_bins),
+              position=0, desc='Coherence Times')
+    for (coh, (lof, hif_inclusive, df)) in pb:
+        pb.set_description(f"Coherence time {coh}")
+        start = time()
 
         # Calculate number of exact chunk
         exact_chunks = TIME_2003_TO_2020 // coh
@@ -55,19 +61,25 @@ if __name__ == "__main__":
         coh_freqs = (lof + np.arange(num_frequencies)) * df
 
         # The s and z coherent elements are collected over all coherence time chunks
-        s_chunks = np.zeros(total_chunks)
-        z_chunks = np.zeros(total_chunks)
-        for chunk in range(total_chunks):
+        s_chunks = np.zeros((total_chunks, num_frequencies, 3)) + 0j
+        z_chunks = np.zeros((total_chunks, num_frequencies, 3)) + 0j
+        pb_inner = tqdm(range(total_chunks), position=1,
+                        desc="Coherence Chunk")
+        for chunk in pb_inner:
+            # pb_inner.set_description(f"Chunk {chunk} of {total_chunks}")
             # STEP 1: DATA VECTOR
             # a) gather every x_i chunk
             # b) perform fft and get subseries
             # c) build data vector
             data_vector = np.zeros((15, num_frequencies)) + 0j
 
+            # ffts, mean, var, bounds
+            steps = 1 + 1 + 1 + 1
+            pb_steps = tqdm(range(steps), position=2)
             for x in [1, 2, 3, 4, 5]:
                 series = np.load(f"../{NPY_DIRECTORY}/X{x}", mmap_mode="r")
 
-                print(f"X{x} chunk {chunk+1} of {total_chunks}")
+                pb_steps.set_description(f"Step 1: Calculating X{x}")
 
                 # Start and end of this chunk in the series
                 start = chunk * coh
@@ -90,6 +102,10 @@ if __name__ == "__main__":
                 data_vector[x - 1 + 5] = mid
                 data_vector[x - 1 + 10] = hi
 
+            # Done with data vector
+            pb_steps.update(1)
+
+            pb_steps.set_description(f"Step 2: Calculating Theory Mean")
             # STEP 2: Theory Mean
             # 1) construct DFT kernels
             # 2) load H_i and add their DFT contributions to mux, muy, muz
@@ -256,6 +272,10 @@ if __name__ == "__main__":
             mu = np.ascontiguousarray(np.array([mux, muy, muz]))
             del mux, muy, muz
 
+            # Done with mean
+            pb_steps.update(1)
+
+            pb_steps.set_description(f"Step 3: Theory Var")
             # STEP 3: Theory Var
             # 1) For this coherence time/chunk, what stationarity times does this overlap with?
             # 2) Calculate overlap
@@ -266,15 +286,18 @@ if __name__ == "__main__":
             #
             #   This is done for f = fc-fdh, fc, fc+fdh, which is x=0,1,2 (e.g. 4.0.0)
 
-            # NOTE: This is initialized this way so that each of the 5x5 matrices are contiguous in memory
+            # NOTE: This is initialized this way so that each of the 15x15 matrices are contiguous in memory
             # I don't like that this is a sparse matrix but it shouldn't be too bad...
-            sigma = np.zeros((15, 15, num_frequencies))
-            # sigma = np.zeros((5, 5, num_frequencies + 2*approx_sidereal)) # Potential change later
+            sigma = np.zeros((num_frequencies, 15, 15)) + 0j
+            # sigma = np.zeros((num_frequencies + 2*approx_sidereal, 5, 5)) # Potential change later
 
             # find_overlap_chunks does
             # 1) Find overlapping stationarity times
             # 2) Calculate overlap
             overlapping_stationarity_times = find_overlap_chunks(coh, chunk)
+
+            # Init lock for sharing the progress bar in case it's not multithreaded by default
+
             for i in range(5):
                 for j in range(i, 5):
                     for (stationarity_chunk, overlap) in overlapping_stationarity_times:
@@ -283,20 +306,18 @@ if __name__ == "__main__":
                         ijchunk_dir = get_stationarity_chunk_dir(
                             stationarity_chunk)
                         ijchunk = np.load(
-                            f"{ijchunk_dir}/X{i+1}X{j+1}_{stationarity_chunk:05d}")
+                            f"{ijchunk_dir}/X{i+1}X{j+1}_{stationarity_chunk}.npy")
 
                         # 4.0.0) Interpolate to correct frequencies (one sidereal day to the left)
-                        # TODO: confirm modulus
                         interpolated_power = np.interp(
                             (coh_freqs - approx_sidereal) % 1.0, SPECTRA_FREQS, ijchunk)
 
                         # 4.0.1) Add overlap * interpolated_power to sigma
                         if i == j:
-                            sigma[i, i] += overlap * interpolated_power
+                            sigma[:, i, i] += overlap * interpolated_power
                         else:
-                            # TODO: check conjugation
-                            sigma[i, j] += overlap * interpolated_power
-                            sigma[j, i] += overlap * \
+                            sigma[:, i, j] += overlap * interpolated_power
+                            sigma[:, j, i] += overlap * \
                                 np.conj(interpolated_power)
 
                         # 4.1.0) Interpolate to correct frequencies
@@ -305,27 +326,32 @@ if __name__ == "__main__":
 
                         # 4.1.1) Add overlap * interpolated_power to sigma
                         if i == j:
-                            sigma[i+5, i+5] += overlap * interpolated_power
+                            sigma[:, i+5, i+5] += overlap * \
+                                interpolated_power
                         else:
-                            # TODO: check conjugation
-                            sigma[i+5, j+5] += overlap * interpolated_power
-                            sigma[j+5, i+5] += overlap * \
+                            sigma[:, i+5, j+5] += overlap * \
+                                interpolated_power
+                            sigma[:, j+5, i+5] += overlap * \
                                 np.conj(interpolated_power)
 
                         # 4.2.0) Interpolate to correct frequencies (one sidereal day to the left)
-                        # TODO: confirm modulus
                         interpolated_power = np.interp(
                             (coh_freqs + approx_sidereal) % 1.0, SPECTRA_FREQS, ijchunk)
 
                         # 4.2.1) Add overlap * interpolated_power to sigma
                         if i == j:
-                            sigma[i+10, i+10] += overlap * interpolated_power
+                            sigma[:, i+10, i+10] += overlap * \
+                                interpolated_power
                         else:
-                            # TODO: check conjugation
-                            sigma[i+10, j+10] += overlap * interpolated_power
-                            sigma[j+10, i+10] += overlap * \
+                            sigma[:, i+10, j+10] += overlap * \
+                                interpolated_power
+                            sigma[:, j+10, i+10] += overlap * \
                                 np.conj(interpolated_power)
 
+            # Increment component
+            pb_steps.update(1)
+
+            pb_steps.set_description("Step 4: s and z")
             # STEP 4: Calculate s and z for each chunk of this coherence time to obtain likelihood
             # 1) Carry out Cholesky decomoposition on Sigma_k = A_k * Adag_k, obtaining A_k
             # 2) Invert A_k, obtaining Ainv_k
@@ -334,42 +360,43 @@ if __name__ == "__main__":
             # 5) SVD into Nk = nu_ik -> U_k * S_k * Vdag_k, obtaining U_k
             # 6) Calculate Z_k = Udag_k * Y_k
 
-            # Switch sigma to be contiguous for linalg
-            sigma = np.ascontiguousarray(np.transpose(sigma, (2, 0, 1)))
-            assert sigma.shape == (num_frequencies, 15, 15)
-
             # 1) Carry out Cholesky decomoposition on Sigma_k = A_k * Adag_k, obtaining A_k
             # 2) Invert A_k, obtaining Ainv_k
             a_inv = np.linalg.inv(np.linalg.cholesky(sigma))
-            assert nu.shape == (num_frequencies, 5, 5)
+            assert a_inv.shape == (num_frequencies, 15, 15), f"{a_inv.shape}"
 
             # 3) Calculate Y_k = Ainv_k * X_k
-            yk = a_inv @ data_vector
+            yk = np.einsum("fij, jf -> fi", a_inv, data_vector)
 
             # 4) Calculate nu_ik = Ainv_k * mu_ik
-            nu = a_inv @ mu
-            assert nu.shape == (num_frequencies, 15, 3)
+            nu = a_inv @ mu.T
+            assert nu.shape == (num_frequencies, 15, 3), f"{nu.shape}"
 
             # 5) SVD into Nk = nu_ik -> U_k * S_k * Vdag_k, obtaining U_k
             u, s, vh = np.linalg.svd(nu, full_matrices=False)
-            assert u.shape == (num_frequencies, 15, 3)
-            assert s.shape == (num_frequencies, 3)
+            assert u.shape == (num_frequencies, 15, 3), f"{u.shape}"
+            assert s.shape == (num_frequencies, 3), f"{s.shape}"
 
             # 6) Calculate Z_k = Udag_k * Y_k
-            udag = np.conj(np.transpose(u, (-1, -2)))
-            assert udag.shape == (num_frequencies, 3, 15)
-            z = udag * yk
-            assert z.shape == (num_frequencies, 3)
+            udag = np.conj(np.transpose(u, (0, 2, 1)))
+            assert udag.shape == (num_frequencies, 3, 15), f"{udag.shape}"
+            z = np.einsum("fij, fj -> fi", udag, yk)
+            assert z.shape == (num_frequencies, 3), f"{z.shape}"
 
-            # append
-            s.append(s)
-            z.append(z)
-        # Here we swap so that the "independent" measurements across different coherence times
-        # are contiguous in memory
-        s = np.ascontiguousarray(np.transpose(np.array(s), (0, 1)))
-        z = np.ascontiguousarray(np.transpose(np.array(z), (0, 1)))
-        assert s.shape == (num_frequencies, total_chunks, 3)
-        assert z.shape == (num_frequencies, total_chunks, 3)
+            # Write to s and z arrays
+            s_chunks[chunk] = s
+            z_chunks[chunk] = z
+        # Here we swap axes so that the "independent" measurements for a particular frequency
+        # across different coherence times are contiguous in memory
+        s_chunks = np.ascontiguousarray(
+            np.transpose(np.array(s_chunks), (1, 0, 2)))
+        z_chunks = np.ascontiguousarray(
+            np.transpose(np.array(z_chunks), (1, 0, 2)))
+        assert s_chunks.shape == (num_frequencies, total_chunks, 3)
+        assert z_chunks.shape == (num_frequencies, total_chunks, 3)
 
         # STEP 5: Calculate likelihood -ln Lk = |Z_k - eps * S_k * d_k|^2
-        bound = calculate_bounds(coh, coh_freqs, s, z)
+        pb_inner.set_description("Calculating bounds")
+        bound = calculate_bounds(coh, coh_freqs, s_chunks, z_chunks)
+
+        # elapsed = (time() - start) / 60

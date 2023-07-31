@@ -22,7 +22,7 @@ def calculate_bounds(coh, coh_freqs, s, z):
     z: (number of frequencies for this coherence chunk, number of coherence chunks, 3)
     """
     bounds = np.zeros(len(s))
-    for (i, (sf, zf)) in enumerate(s.zip(z)):
+    for (i, (sf, zf)) in enumerate(zip(s, z)):
 
         # 1) Find where eps is maximum in the logspace grid (with unknown norm set to 1)
         grid_logP = np.array(
@@ -47,11 +47,12 @@ def calculate_bounds(coh, coh_freqs, s, z):
         area_integrand = grid_logP - max_logP + np.log(SCAN_GRID)
         cumtrapz_area = integrate.cumulative_trapezoid(
             area_integrand, SCAN_GRID, initial=0)
+        # Renormalize
         # In this line, we assume 100% of the mass is contained within [MAX_LOG10EPS, MIN_LOG10EPS]
-        cumtrapz_area_renormalized /= cumtrapz_area[-1]
+        cumtrapz_area /= cumtrapz_area[-1]
 
         # Find index of first element which is >0.95
-        idx_95 = find_cumsum_index(cumtrapz_area_renormalized, 0.95)
+        idx_95 = find_cumsum_index(cumtrapz_area, 0.95)
         # eps = SCAN_GRID[idx_95]
         bounds[i] = SCAN_GRID[idx_95]
 

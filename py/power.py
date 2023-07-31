@@ -123,7 +123,7 @@ if __name__ == "__main__":
 
             # Hermitian so only need i to 5
             for j in range(i, 5):
-                jchunk = np.load(f"../{NPY_DIRECTORY}/X{i+1}",
+                jchunk = np.load(f"../{NPY_DIRECTORY}/X{j+1}",
                                  mmap_mode="r")[start_second:end_second]
 
                 spectra = calculate_spectra(ichunk, jchunk, tau_chunks)
